@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>SolPersona Gallery</title>
+<!--
+  SolPersona Gallery for Raspberry Pi — the player.
+
+  Full screen in Chromium (kiosk, under cage). It draws; the local agent at
+  127.0.0.1:8737 holds the screen's credential, talks to SolPersona, keeps the
+  gallery on the SD card and switches the panel. The reference this follows is
+  docs/solpersona/reference/device-simulator.html; the contract is
+  docs/solpersona/SPEC.md.
+-->
+</head>
+<body>
+<div id="stage">
+  <div class="layer" id="layerA"></div>
+  <div class="layer" id="layerB"></div>
+  <div id="loading"></div>
+
+  <!-- First run: register this screen (SPEC §3.2, wording §11c) -->
+  <div class="screen" id="screenPairing">
+    <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+    <div class="pair">
+      <div class="pair-qr"><img id="pairQr" alt="QR code to link this screen" hidden><div class="ph" id="pairQrPh">Asking for a code…</div></div>
+      <div class="pair-text">
+        <div class="pair-kicker">New screen</div>
+        <div class="pair-title">Register this screen to your SolPersona account</div>
+        <div class="pair-step">Scan the code with your phone, or go to <b id="pairHost">solpersona.com/pair</b> and enter</div>
+        <div class="pair-code" id="pairCode"></div>
+        <div class="pair-meta" id="pairExpiry"></div>
+        <div class="pair-actions">
+          <span class="pair-sample" id="btnSample">Try a sample gallery</span>
+          <span class="pair-hint">press <b>OK</b> on the remote or <b>Enter</b></span>
+        </div>
+        <div class="pair-err" id="pairErr"></div>
+      </div>
+    </div>
+    <div class="device-id" id="pairDevice"></div>
+  </div>
+
+  <!-- No network: the setup hotspot -->
+  <div class="screen" id="screenSetup">
+    <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+    <div class="pair">
+      <div class="pair-qr"><img id="setupQr" alt="QR code to join the setup Wi-Fi"></div>
+      <div class="pair-text">
+        <div class="pair-kicker">Wi-Fi setup</div>
+        <div class="pair-title">Join Wi-Fi <span class="nowrap" id="setupSsid"></span> on your phone to connect this screen</div>
+        <div class="pair-step">Scan the code with your phone's camera. A page opens where you choose your Wi-Fi and type its password.</div>
+        <div class="pair-step" id="setupSecured" hidden>The setup network's password is in the file <b>solpersona-gallery.toml</b> on the card.</div>
+        <div class="pair-step dim">A network cable works too: plug it in and this screen connects by itself.</div>
+        <div class="pair-err" id="setupErr"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Linked, nothing to play -->
+  <div class="screen" id="screenIdle">
+    <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+    <div class="center-block">
+      <div class="idle-clock" id="idleClock">--:--</div>
+      <div class="idle-ready" id="idleReady">Ready</div>
+      <div class="idle-name" id="idleName"></div>
+      <div class="idle-owner" id="idleOwner"></div>
+    </div>
+  </div>
+
+  <!-- Linked, but not covered on the account. Store-safe wording, exactly as SPEC §11c. -->
+  <div class="screen" id="screenUnlicensed">
+    <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+    <div class="center-block">
+      <div class="notice-title">This screen isn't active on your account yet.</div>
+      <div class="notice-body">The account owner can manage their screens at <span id="inactiveHost">solpersona.com</span>.</div>
+      <div class="idle-owner" id="inactiveName"></div>
+    </div>
+  </div>
+
+  <!-- While the sample plays: how to link, small, in a corner the show leaves free -->
+  <div id="sampleCard" class="card">
+    <img id="sampleQr" alt="QR code to link this screen" hidden>
+    <div>
+      <div class="k">Sample gallery</div>
+      <div class="t">Link this screen — <span id="sampleHost"></span><span id="sampleCodeSep"> · </span><span class="code" id="sampleCode"></span></div>
+      <div class="t dim">Press Back to stop the sample</div>
+    </div>
+  </div>
+
+  <!-- Linked, playing from the card, and the setup network is open -->
+  <div id="setupCard" class="card">
+    <img id="setupCardQr" alt="QR code to join the setup Wi-Fi">
+    <div>
+      <div class="k">No network</div>
+      <div class="t">To connect this screen, join Wi-Fi <span class="code" id="setupCardSsid"></span></div>
+    </div>
+  </div>
+
+  <div id="blackout"><div class="tiny" id="blackoutClock"></div></div>
+  <div id="identify"><div class="who" id="identifyName"></div><div class="sub">This screen</div></div>
+
+  <!-- OK / Enter on a remote or keyboard (SPEC §11) -->
+  <div id="overlay" role="dialog" aria-label="This screen">
+    <div class="ov-panel">
+      <div class="ov-kicker">This screen</div>
+      <div class="ov-name" id="ovName"></div>
+      <div class="ov-rows" id="ovRows"></div>
+      <div class="ov-buttons">
+        <div class="ov-btn" id="ovForget" data-action="forget">Forget this account</div>
+        <div class="ov-btn" id="ovDebug" data-action="debug">Show debug</div>
+      </div>
+      <div class="ov-hint">Back to close</div>
+    </div>
+  </div>
+
+  <div id="offline" title="Offline — playing by the last clock"></div>
+</div>
+<div id="debug"></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

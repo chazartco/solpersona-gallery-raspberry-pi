@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  player:
+    name: Player (TypeScript)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: player
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Types
+        run: npm run typecheck
+      - name: Tests (test-vectors.json, the tick)
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  agent:
+    name: Agent (Python, as on Bookworm)
+    runs-on: ubuntu-24.04
+    # Debian Bookworm with Debian's own python3-aiohttp and python3-pil: exactly
+    # what the Pi runs (no pip on the device).
+    container: debian:bookworm-slim
+    steps:
+      - name: Python packages from Debian
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-aiohttp python3-pil python3-pytest openssl ca-certificates git
+      - uses: actions/checkout@v4
+      - name: Tests (test-vectors.json, pairing/sync state machine, store, updater)
+        working-directory: agent
+        run: python3 -m pytest -q
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck -S warning \
+            image/build.sh scripts/*.sh dev/*.sh \
+            image/stage-solpersona/prerun.sh image/stage-solpersona/*/0*-run*.sh \
+            image/stage-solpersona/02-system/files/rootfs/usr/lib/solpersona-gallery/*.sh \
+            image/stage-solpersona/02-system/files/rootfs/usr/lib/solpersona-gallery/run-agent \
+            image/stage-solpersona/02-system/files/rootfs/usr/lib/solpersona-gallery/run-updater
+      - name: No private keys or access tokens in the repository
+        run: |
+          if git grep -nE '(BEGIN (EC |OPENSSH |RSA )?PRIVATE KEY|sps_[A-Za-z0-9_-]{20,})' -- ':!docs/solpersona'; then
+            echo "a secret is committed"; exit 1
+          fi

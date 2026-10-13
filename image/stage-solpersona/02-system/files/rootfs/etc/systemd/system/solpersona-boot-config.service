@@ -1,0 +1,13 @@
+[Unit]
+Description=SolPersona Gallery: apply the settings file (time zone, Wi-Fi country)
+DefaultDependencies=no
+After=local-fs.target boot-firmware.mount solpersona-firstboot.service
+Before=NetworkManager.service solpersona-agent.service solpersona-kiosk.service systemd-timesyncd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/solpersona-gallery/boot-config.sh
+
+[Install]
+WantedBy=sysinit.target

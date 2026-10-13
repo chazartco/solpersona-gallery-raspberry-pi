@@ -1,0 +1,5 @@
+#!/bin/sh
+# The updater always runs from the read-only root, never from an updated copy:
+# a bad release must not be able to break its own way back.
+export PYTHONPATH=/usr/lib/solpersona-gallery/agent
+exec /usr/bin/python3 -m solpersona_gallery.updater "$@"

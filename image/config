@@ -1,0 +1,22 @@
+# pi-gen settings for the SolPersona Gallery image (see image/build.sh).
+# Raspberry Pi OS Lite (Bookworm, 64-bit) plus one stage of our own.
+
+IMG_NAME=solpersona-gallery
+RELEASE=bookworm
+ARCH=arm64
+TARGET_HOSTNAME=solpersona-gallery
+LOCALE_DEFAULT=en_GB.UTF-8
+KEYBOARD_KEYMAP=gb
+KEYBOARD_LAYOUT="English (UK)"
+TIMEZONE_DEFAULT=Etc/UTC
+
+# An appliance: no first-boot user wizard on the screen, no SSH unless the
+# person turns it on in Raspberry Pi Imager. The first user's password is
+# random per build (build.sh) and the account is locked in our stage.
+FIRST_USER_NAME=solpersona
+DISABLE_FIRST_BOOT_USER_RENAME=1
+ENABLE_SSH=0
+
+STAGE_LIST="stage0 stage1 stage2 stage-solpersona"
+DEPLOY_COMPRESSION=xz
+COMPRESSION_LEVEL=6

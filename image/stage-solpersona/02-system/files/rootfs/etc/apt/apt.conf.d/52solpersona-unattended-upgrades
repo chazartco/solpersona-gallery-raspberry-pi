@@ -1,0 +1,12 @@
+// Security updates only (SPEC: OS packages via unattended-upgrades, security only).
+// Run by solpersona-updater in a maintenance window, never by apt's own timers
+// (masked): the root is read-only except during that window.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::MinimalSteps "true";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";

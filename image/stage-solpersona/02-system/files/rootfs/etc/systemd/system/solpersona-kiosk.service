@@ -1,0 +1,29 @@
+[Unit]
+Description=SolPersona Gallery wall (Chromium, full screen, in the cage compositor)
+After=systemd-user-sessions.service solpersona-agent.service solpersona-firstboot.service getty@tty1.service
+Wants=solpersona-agent.service
+Conflicts=getty@tty1.service
+
+[Service]
+User=gallery
+# A real login session on tty1, so cage gets the display, input and a runtime directory.
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland HOME=/run/solpersona-kiosk
+RuntimeDirectory=solpersona-kiosk
+# cage: one full-screen app, no desktop. kiosk.sh relaunches Chromium inside it
+# if it exits, so the panel never drops back to a console.
+ExecStart=/usr/bin/cage -d -- /usr/lib/solpersona-gallery/kiosk.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target

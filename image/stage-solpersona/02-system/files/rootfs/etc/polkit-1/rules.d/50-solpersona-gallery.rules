@@ -1,0 +1,7 @@
+// The agent (user `gallery`) may manage NetworkManager — open the setup
+// network, join the Wi-Fi a person picked — and nothing else.
+polkit.addRule(function (action, subject) {
+  if (subject.user === "gallery" && action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+    return polkit.Result.YES;
+  }
+});

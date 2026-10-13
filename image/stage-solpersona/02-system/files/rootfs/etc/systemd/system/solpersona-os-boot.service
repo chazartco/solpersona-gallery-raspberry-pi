@@ -1,0 +1,15 @@
+[Unit]
+Description=SolPersona Gallery: finish weekly OS security updates (after a maintenance reboot)
+ConditionPathExists=/var/lib/solpersona-gallery-app/os-maintenance
+After=network-online.target
+Wants=network-online.target
+Before=solpersona-kiosk.service
+RequiresMountsFor=/var/lib/solpersona-gallery-app
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/solpersona-gallery/run-updater os-boot
+TimeoutStartSec=90min
+
+[Install]
+WantedBy=multi-user.target

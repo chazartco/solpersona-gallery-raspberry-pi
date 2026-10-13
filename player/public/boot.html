@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SolPersona Gallery</title>
+<!--
+  Chromium opens this file from disk first. It waits for the local agent to
+  answer, then hands over to the player the agent serves — so a kiosk that
+  starts a moment before the agent never shows an error page.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; cursor: none; overflow: hidden; }
+  i { position: fixed; left: 50%; top: 50%; width: 1.1vmin; height: 1.1vmin; margin: -0.55vmin; border-radius: 50%;
+      background: #2b7ff5; animation: b 1.8s ease-in-out infinite; }
+  @keyframes b { 0%, 100% { transform: scale(0.7); opacity: 0.35; } 50% { transform: scale(1.15); opacity: 0.9; } }
+</style>
+</head>
+<body><i></i>
+<script>
+  var agent = (new URLSearchParams(location.search).get('agent') || 'http://127.0.0.1:8737').replace(/\/+$/, '');
+  function attempt() {
+    fetch(agent + '/healthz', { cache: 'no-store' })
+      .then(function (r) { if (r.ok) location.replace(agent + '/'); else setTimeout(attempt, 1000); })
+      .catch(function () { setTimeout(attempt, 1000); });
+  }
+  attempt();
+</script>
+</body>
+</html>

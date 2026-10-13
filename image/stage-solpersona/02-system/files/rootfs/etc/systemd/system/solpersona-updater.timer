@@ -1,0 +1,12 @@
+[Unit]
+Description=SolPersona Gallery: look for updates, and check a new version is healthy
+
+[Timer]
+# Often, because a fresh version must be checked within minutes; almost every
+# run does nothing (the release check itself is once a day).
+OnBootSec=3min
+OnUnitActiveSec=150s
+RandomizedDelaySec=20s
+
+[Install]
+WantedBy=timers.target

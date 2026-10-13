@@ -1,0 +1,11 @@
+[Unit]
+Description=SolPersona Gallery: updates (app from signed releases, OS security weekly)
+After=network-online.target solpersona-agent.service
+RequiresMountsFor=/var/lib/solpersona-gallery-app
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/solpersona-gallery/run-updater tick
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle

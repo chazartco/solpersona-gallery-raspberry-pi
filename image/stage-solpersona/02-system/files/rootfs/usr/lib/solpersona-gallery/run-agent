@@ -1,0 +1,3 @@
+#!/bin/sh
+. /usr/lib/solpersona-gallery/app-root.sh
+exec /usr/bin/python3 -m solpersona_gallery

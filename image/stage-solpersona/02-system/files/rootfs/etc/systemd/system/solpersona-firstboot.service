@@ -1,0 +1,19 @@
+[Unit]
+Description=SolPersona Gallery: prepare the card (first start only)
+# Once: the marker is written to the root before it becomes read-only.
+ConditionPathExists=!/etc/solpersona-gallery/firstboot-done
+# Raspberry Pi Imager's settings are applied by its own script in a boot of
+# their own, which deletes the script when done: wait for that boot to finish.
+ConditionPathExists=!/boot/firmware/firstrun.sh
+DefaultDependencies=no
+After=local-fs.target systemd-remount-fs.service regenerate_ssh_host_keys.service
+Before=NetworkManager.service solpersona-agent.service solpersona-kiosk.service sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/solpersona-gallery/firstboot.sh
+StandardOutput=journal+console
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=sysinit.target

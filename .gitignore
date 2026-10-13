@@ -1,0 +1,18 @@
+# Builds
+player/node_modules/
+player/dist/
+image/.work/
+image/deploy/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Development
+dev/fixtures/*.mp4
+
+# Never commit the release signing key (scripts/make-signing-key.sh)
+release-signing.key
+*.key

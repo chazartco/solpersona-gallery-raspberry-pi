@@ -1,0 +1,20 @@
+Copyright (c) 2026 SolPersona. All rights reserved.
+
+This repository is published so that its code can be read and reviewed. No
+licence is granted to copy, modify, distribute, sublicense or sell this
+software or any part of it, in source or binary form, except with the prior
+written permission of the copyright holder.
+
+You may download and flash the released SD card images onto your own
+Raspberry Pi to use it as a SolPersona Gallery screen.
+
+The image contains third-party software (Raspberry Pi OS, Debian, Chromium,
+cage and others), each under its own licence; nothing here changes those
+licences. Fonts in the player (EB Garamond, Inter) are under the SIL Open Font
+License 1.1; qrcode-generator is under the MIT licence.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY ARISING FROM THE USE OF THE SOFTWARE.

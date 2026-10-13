@@ -1,0 +1,10 @@
+cage
+wlr-randr
+python3-aiohttp
+python3-pil
+v4l-utils
+overlayroot
+unattended-upgrades
+fonts-dejavu-core
+iw
+rfkill

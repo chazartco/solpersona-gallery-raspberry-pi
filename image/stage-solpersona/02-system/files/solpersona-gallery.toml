@@ -1,0 +1,51 @@
+# SolPersona Gallery — settings for this screen.
+#
+# This file is on the card's boot partition, so you can edit it from any
+# computer: put the card in, open this file, change a line, save, put the card
+# back in the Pi. Lines starting with # are notes and are ignored; remove the
+# # in front of a setting to use it. A mistake here never stops the screen —
+# a value it does not understand is ignored.
+
+# The SolPersona the screen belongs to. Only change this to try a development
+# or staging SolPersona: changing it unlinks the screen.
+# base_url = "https://solpersona.com"
+
+# The name offered when the screen is linked (you can rename it in the dashboard).
+# screen_name = "Front window"
+
+# How much of the card the gallery may use, in MB. 0 = most of the free space.
+# cache_mb = 0
+
+# Show the developer panel (connection, clock, cache, API calls). D toggles it.
+# debug = false
+
+# Turn the picture for a screen hung on its side: 0, 90, 180 or 270.
+# rotation = 0
+
+# Time zone for opening hours, e.g. "Europe/London". Empty: as set by Raspberry Pi Imager.
+# timezone = ""
+
+# Two-letter country code for Wi-Fi rules, e.g. "GB", "US", "DE". Empty: as set by
+# Raspberry Pi Imager, else world-wide defaults (2.4 GHz).
+# wifi_country = ""
+
+# Output resolution: "auto" (the panel's own, up to 4K), "4k" or "1080p".
+# A Pi 4 on a 4K television looks smoother at "1080p" with lots of video.
+# resolution = "auto"
+
+# Outside opening hours: "auto" (HDMI-CEC standby, else switch HDMI off),
+# "cec", "hdmi", or "black" (just show black).
+# screen_off = "auto"
+
+# A password for the screen's own setup Wi-Fi (8–63 characters). Empty: open.
+# hotspot_password = ""
+
+# Install new versions of this app automatically (at night or outside opening hours).
+# updates = true
+
+# Debian security updates for the system: "weekly" or "off".
+# os_updates = "weekly"
+
+# Store very large originals at the screen's size (sharper and faster; the
+# original file is never shown larger than the screen anyway).
+# optimise_images = true

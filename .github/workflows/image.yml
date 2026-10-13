@@ -1,0 +1,44 @@
+name: Image
+
+# Builds the SD card image. Manually (Actions → Image → Run workflow) for a
+# test image, attached to the run; and from release.yml for every release.
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: pi-gen (Raspberry Pi OS Lite, Bookworm, arm64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Room to build (pi-gen needs ~20 GB)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - name: arm64 emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Build
+        env:
+          RELEASE_REPO: ${{ github.repository }}
+        run: bash image/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: |
+            image/deploy/*.img.xz
+            image/deploy/*.sha256
+            image/deploy/solpersona-gallery-app-*.tar.gz
+          retention-days: 14
+          compression-level: 0

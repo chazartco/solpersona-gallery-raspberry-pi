@@ -1,0 +1,6 @@
+IMG_SUFFIX=""
+if [ "${USE_QCOW2}" = "1" ]; then
+	NO_PRERUN_QCOW2=0
+else
+	NO_PRERUN_QCOW2=1
+fi

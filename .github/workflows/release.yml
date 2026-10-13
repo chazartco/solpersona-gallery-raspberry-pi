@@ -1,0 +1,62 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching __version__ in agent/solpersona_gallery/__init__.py).
+# Publishes a GitHub release with:
+#   solpersona-gallery-<v>.img.xz (+ .sha256)   the image to flash
+#   solpersona-gallery-app-<v>.tar.gz           the app bundle screens update to
+#   SHA256SUMS, SHA256SUMS.sig                  signed with RELEASE_SIGNING_KEY
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the app's version
+        run: |
+          v="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' agent/solpersona_gallery/__init__.py)"
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} but __version__ is $v"; exit 1; }
+      - name: The signing key is set
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: '[ -n "$RELEASE_SIGNING_KEY" ] || { echo "Add RELEASE_SIGNING_KEY (scripts/make-signing-key.sh)"; exit 1; }'
+
+  ci:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: ci
+    uses: ./.github/workflows/image.yml
+    with:
+      release: true
+
+  publish:
+    needs: image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: out
+      - name: Sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: bash scripts/sign-release.sh out
+      - name: Check the signature with the key screens trust
+        run: |
+          [ -f image/release-signing.pub ] || { echo "commit image/release-signing.pub"; exit 1; }
+          openssl pkeyutl -verify -pubin -inkey image/release-signing.pub -rawin -in out/SHA256SUMS -sigfile out/SHA256SUMS.sig
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/* \
+            --title "SolPersona Gallery ${GITHUB_REF_NAME}" \
+            --notes "Flash \`solpersona-gallery-${GITHUB_REF_NAME#v}.img.xz\` with Raspberry Pi Imager (Use custom). Screens already in use update themselves at night."
