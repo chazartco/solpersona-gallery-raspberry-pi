@@ -1,0 +1,99 @@
+{
+  "about": "Shared test vectors for SolPersona Gallery players (protocol v1). Every port of the clock must reproduce these exactly. Times are milliseconds. Mirrors tests/unit/screen-timeline.test.ts in SolPersona.",
+  "positionAt": [
+    {
+      "name": "start of the show",
+      "timeline": [{ "id": "a", "ms": 10000 }, { "id": "b", "ms": 10000 }, { "id": "c", "ms": 5000 }],
+      "clock": { "epochMs": 1000000, "pausedAtMs": null },
+      "nowMs": 1000000,
+      "expect": { "index": 0, "offsetMs": 0, "lap": 0 }
+    },
+    {
+      "name": "into the second piece",
+      "timeline": [{ "id": "a", "ms": 10000 }, { "id": "b", "ms": 10000 }, { "id": "c", "ms": 5000 }],
+      "clock": { "epochMs": 1000000, "pausedAtMs": null },
+      "nowMs": 1012500,
+      "expect": { "index": 1, "offsetMs": 2500, "lap": 0 }
+    },
+    {
+      "name": "the last millisecond of the first lap",
+      "timeline": [{ "id": "a", "ms": 10000 }, { "id": "b", "ms": 10000 }, { "id": "c", "ms": 5000 }],
+      "clock": { "epochMs": 1000000, "pausedAtMs": null },
+      "nowMs": 1024999,
+      "expect": { "index": 2, "offsetMs": 4999, "lap": 0 }
+    },
+    {
+      "name": "second lap",
+      "timeline": [{ "id": "a", "ms": 10000 }, { "id": "b", "ms": 10000 }, { "id": "c", "ms": 5000 }],
+      "clock": { "epochMs": 1000000, "pausedAtMs": null },
+      "nowMs": 1046000,
+      "expect": { "index": 2, "offsetMs": 1000, "lap": 1 }
+    },
+    {
+      "name": "paused: time passes, the position does not",
+      "timeline": [{ "id": "a", "ms": 10000 }, { "id": "b", "ms": 10000 }, { "id": "c", "ms": 5000 }],
+      "clock": { "epochMs": 0, "pausedAtMs": 12000 },
+      "nowMs": 60000,
+      "expect": { "index": 1, "offsetMs": 2000, "lap": 0 }
+    },
+    {
+      "name": "a clock moved by 'next' while paused lands on the start of the next piece",
+      "timeline": [{ "id": "a", "ms": 10000 }, { "id": "b", "ms": 10000 }, { "id": "c", "ms": 5000 }],
+      "clock": { "epochMs": -7000, "pausedAtMs": 3000 },
+      "nowMs": 90000,
+      "expect": { "index": 1, "offsetMs": 0, "lap": 0 }
+    },
+    {
+      "name": "empty timeline",
+      "timeline": [],
+      "clock": { "epochMs": 0, "pausedAtMs": null },
+      "nowMs": 5000,
+      "expect": null
+    }
+  ],
+  "videoSlotMs": {
+    "about": "How the server sizes a video slot (whole plays only). Players do not compute this — it arrives in the timeline — but it explains what a player will see.",
+    "settings": { "slideSeconds": 10, "loopShortVideos": true, "maxVideoLoops": 3 },
+    "cases": [
+      { "durationMs": 4000, "expect": 12000 },
+      { "durationMs": 1000, "expect": 3000 },
+      { "durationMs": 95000, "expect": 95000 },
+      { "durationMs": 4000, "loopShortVideos": false, "expect": 4000 }
+    ]
+  },
+  "clockOffset": [
+    {
+      "name": "offset is server time minus the midpoint of the round trip",
+      "serverTime": 1760000000500,
+      "sentAt": 1759999999000,
+      "receivedAt": 1760000000000,
+      "expect": 1000
+    }
+  ],
+  "imageChoice": {
+    "about": "Which file a still is shown from (SPEC §6.2). `canHoldOriginal` is the device's own judgement (memory/decoder), reported as capabilities.originals.",
+    "cases": [
+      { "quality": "ORIGINAL", "screenWidth": 1280, "canHoldOriginal": false, "original": "O", "display": "D", "expect": "O" },
+      { "quality": "ORIGINAL", "screenWidth": 3840, "canHoldOriginal": true, "original": null, "display": "D", "expect": "D" },
+      { "quality": "DISPLAY", "screenWidth": 3840, "canHoldOriginal": true, "original": "O", "display": "D", "expect": "D" },
+      { "quality": "DISPLAY", "screenWidth": 3840, "canHoldOriginal": true, "original": "O", "display": null, "expect": "O" },
+      { "quality": "AUTO", "screenWidth": 3840, "canHoldOriginal": true, "original": "O", "display": "D", "expect": "O" },
+      { "quality": "AUTO", "screenWidth": 1920, "canHoldOriginal": false, "original": "O", "display": "D", "expect": "D" },
+      { "quality": "AUTO", "screenWidth": 1280, "canHoldOriginal": true, "original": "O", "display": "D", "expect": "D" },
+      { "quality": "AUTO", "screenWidth": 1280, "canHoldOriginal": true, "original": "O", "display": null, "expect": "O" }
+    ]
+  },
+  "schedule": {
+    "about": "Is the screen within opening hours at this local time? (SPEC §8)",
+    "cases": [
+      { "schedule": null, "time": "03:00", "expect": true },
+      { "schedule": { "on": "09:00", "off": "22:00" }, "time": "08:59", "expect": false },
+      { "schedule": { "on": "09:00", "off": "22:00" }, "time": "09:00", "expect": true },
+      { "schedule": { "on": "09:00", "off": "22:00" }, "time": "22:00", "expect": false },
+      { "schedule": { "on": "18:00", "off": "02:00" }, "time": "23:30", "expect": true },
+      { "schedule": { "on": "18:00", "off": "02:00" }, "time": "01:59", "expect": true },
+      { "schedule": { "on": "18:00", "off": "02:00" }, "time": "12:00", "expect": false },
+      { "schedule": { "on": "10:00", "off": "10:00" }, "time": "04:00", "expect": true }
+    ]
+  }
+}

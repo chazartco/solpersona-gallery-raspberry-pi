@@ -1,0 +1,2899 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>SolPersona Gallery Simulator</title>
+<!--
+  SolPersona Gallery — device simulator.
+
+  One self-contained page that behaves exactly like the television app, and is
+  the reference implementation the Android TV / Tizen / webOS players follow.
+  No dependencies: everything a screen needs is in this file.
+
+  The contract is docs/GALLERY-SCREENS.md; the clock is src/lib/screen-timeline.ts,
+  mirrored below line for line (section 3). Works served from SolPersona at
+  /device-simulator, or opened straight from disk against any SolPersona origin
+  (the device API answers with Access-Control-Allow-Origin: *).
+
+  The same file is the Google Cast receiver: /cast-receiver serves it with
+  window.SOLPERSONA_RECEIVER = true and the CAF receiver SDK in front of it, and
+  it then behaves as an ordinary screen with no simulator chrome (section 10).
+  The full protocol is docs/gallery-development/SPEC.md.
+-->
+<style>
+  :root {
+    --accent: #2b7ff5;
+    --ink: #ece9e3;
+    --ink-dim: rgba(236, 233, 227, 0.62);
+    --ink-faint: rgba(236, 233, 227, 0.38);
+    --bg: #050505;
+    --panel: rgba(18, 18, 20, 0.94);
+    --line: rgba(255, 255, 255, 0.09);
+    --serif: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--sans); overflow: hidden; }
+  body.idle-cursor, body.idle-cursor * { cursor: none !important; }
+  button, input, select { font: inherit; color: inherit; }
+
+  /* ---- The viewport and the simulated screen ---------------------------- */
+  #viewport { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #0a0a0b; }
+  #stage {
+    --u: 10px;            /* 1% of the screen's shorter side; set from JS */
+    --bx: 0px; --by: 0px; /* burn-in guard shift */
+    position: relative; overflow: hidden; background: #000;
+    font-size: calc(var(--u) * 2);
+  }
+  #viewport.letterboxed #stage { box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 20px 80px rgba(0,0,0,0.6); }
+
+  /* ---- Layers: two, so one can dissolve into the other ------------------ */
+  .layer { position: absolute; inset: 0; opacity: 0; overflow: hidden; background: #000; }
+  .layer.fit-FRAME { background: radial-gradient(ellipse at 50% 38%, #2c2a27 0%, #1b1a18 55%, #121110 100%); }
+  .wash { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+          filter: blur(calc(var(--u) * 1.67)); transform: scale(1.15); opacity: 0.6; pointer-events: none; }
+  .piece-box { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  .piece { display: block; max-width: none; }
+  .fit-BLUR .piece, .fit-BLACK .piece { box-shadow: 0 calc(var(--u) * 0.8) calc(var(--u) * 3) rgba(0,0,0,0.45); }
+  /* pieceShadow off: the piece sits flat on the wash. */
+  .fit-BLUR.no-shadow .piece { box-shadow: none; }
+  .fit-FILL .piece { width: 100%; height: 100%; object-fit: cover; }
+  video.piece { background: transparent; }
+
+  /* Frame and mat. Drawn, not imaged: four mouldings and a mat in CSS. */
+  .moulding { padding: calc(var(--u) * 1.5);
+              box-shadow: 0 calc(var(--u) * 1.4) calc(var(--u) * 3.4) rgba(0,0,0,0.55), 0 calc(var(--u) * 0.2) calc(var(--u) * 0.5) rgba(0,0,0,0.5); }
+  .moulding.GALLERY_WHITE { background: linear-gradient(145deg, #fdfcf9 0%, #ece9e2 55%, #dedad2 100%);
+                            box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05), 0 calc(var(--u) * 1.4) calc(var(--u) * 3.4) rgba(0,0,0,0.55); }
+  .moulding.MUSEUM_BLACK { background: linear-gradient(145deg, #2c2c2c 0%, #0d0d0d 38%, #151515 70%, #060606 100%);
+                           box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), 0 calc(var(--u) * 1.4) calc(var(--u) * 3.4) rgba(0,0,0,0.6); }
+  .moulding.OAK { background:
+      repeating-linear-gradient(91deg, rgba(255,240,210,0.07) 0 2px, rgba(90,55,20,0.06) 2px 5px, rgba(0,0,0,0) 5px 9px),
+      repeating-linear-gradient(178deg, rgba(120,80,40,0.10) 0 3px, rgba(0,0,0,0) 3px 11px),
+      linear-gradient(145deg, #d3ad7f 0%, #b88b5c 50%, #a07447 100%); }
+  .moulding.WALNUT { background:
+      repeating-linear-gradient(91deg, rgba(255,220,180,0.05) 0 2px, rgba(0,0,0,0.10) 2px 6px, rgba(0,0,0,0) 6px 10px),
+      repeating-linear-gradient(178deg, rgba(0,0,0,0.12) 0 2px, rgba(0,0,0,0) 2px 9px),
+      linear-gradient(145deg, #74492b 0%, #553420 50%, #3c2415 100%); }
+  .moulding.NONE { padding: 0; background: none; }
+  .mat { padding: calc(var(--u) * 4); background: #f5f3ee;
+         box-shadow: inset 0 calc(var(--u) * 0.25) calc(var(--u) * 0.7) rgba(0,0,0,0.22), inset 0 0 0 1px rgba(0,0,0,0.05); }
+  .moulding.NONE .mat { box-shadow: 0 calc(var(--u) * 1.2) calc(var(--u) * 3) rgba(0,0,0,0.5); }
+  .mat .piece { box-shadow: 0 0 0 calc(var(--u) * 0.22) #fffdf8, 0 0 0 calc(var(--u) * 0.3) rgba(0,0,0,0.14); }
+
+  /* ---- Corners: the wall label and the QR code -------------------------- */
+  .corner { position: absolute; display: flex; flex-direction: column; gap: calc(var(--u) * 1.2);
+            transform: translate(var(--bx), var(--by)); transition: transform 4s ease-in-out; max-width: 46%; }
+  .c-TOP_LEFT     { top: calc(var(--u) * 3.2); left: calc(var(--u) * 3.2); align-items: flex-start; }
+  .c-TOP_RIGHT    { top: calc(var(--u) * 3.2); right: calc(var(--u) * 3.2); align-items: flex-end; }
+  .c-BOTTOM_LEFT  { bottom: calc(var(--u) * 3.2); left: calc(var(--u) * 3.2); align-items: flex-start; justify-content: flex-end; }
+  .c-BOTTOM_RIGHT { bottom: calc(var(--u) * 3.2); right: calc(var(--u) * 3.2); align-items: flex-end; justify-content: flex-end; }
+  .fade { transition: opacity 1.2s ease; }
+  .gone { opacity: 0; }
+
+  .label-card { position: relative; max-width: calc(var(--u) * 36); padding: calc(var(--u) * 1.7) calc(var(--u) * 2.1) calc(var(--u) * 1.8);
+                background: rgba(14, 13, 12, 0.62); -webkit-backdrop-filter: blur(calc(var(--u) * 1.2)); backdrop-filter: blur(calc(var(--u) * 1.2));
+                border: 1px solid rgba(255,255,255,0.07); border-radius: calc(var(--u) * 0.45); color: #f3f0ea;
+                box-shadow: 0 calc(var(--u) * 0.6) calc(var(--u) * 2.2) rgba(0,0,0,0.35); }
+  .label-card::before { content: ''; position: absolute; left: calc(var(--u) * 2.1); top: 0; width: calc(var(--u) * 2.4); height: 2px; background: var(--accent); opacity: 0.9; }
+  .label-title { font-family: var(--serif); font-style: italic; font-size: calc(var(--u) * 2.5); line-height: 1.18; letter-spacing: 0.005em; }
+  .label-artist { font-size: calc(var(--u) * 1.6); font-weight: 600; margin-top: calc(var(--u) * 0.8); letter-spacing: 0.01em; }
+  .label-year { font-size: calc(var(--u) * 1.45); color: rgba(243,240,234,0.66); margin-top: calc(var(--u) * 0.3); font-variant-numeric: tabular-nums; }
+  .label-desc { font-size: calc(var(--u) * 1.38); line-height: 1.5; color: rgba(243,240,234,0.8); margin-top: calc(var(--u) * 1.1);
+                display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  /* One line, on its own quiet backing: a text shadow alone disappears over a
+     white painting, so the line carries a dark translucent pill wherever it sits. */
+  .label-min { font-size: calc(var(--u) * 1.6); color: rgba(255,255,255,0.94); text-shadow: 0 1px calc(var(--u) * 0.3) rgba(0,0,0,0.5);
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: calc(var(--u) * 70);
+               padding: calc(var(--u) * 0.6) calc(var(--u) * 1.3); border-radius: calc(var(--u) * 0.5);
+               background: rgba(14, 13, 12, 0.58); -webkit-backdrop-filter: blur(calc(var(--u) * 1)); backdrop-filter: blur(calc(var(--u) * 1));
+               border: 1px solid rgba(255,255,255,0.06); box-shadow: 0 calc(var(--u) * 0.4) calc(var(--u) * 1.6) rgba(0,0,0,0.25); }
+  .label-min i { font-family: var(--serif); }
+  .label-min .sep { opacity: 0.55; padding: 0 0.4em; }
+
+  .qr-card { width: calc(var(--u) * 11); padding: calc(var(--u) * 0.55) calc(var(--u) * 0.55) calc(var(--u) * 0.7); background: #fff; border-radius: calc(var(--u) * 0.6);
+             box-shadow: 0 calc(var(--u) * 0.5) calc(var(--u) * 2) rgba(0,0,0,0.35); text-align: center; }
+  .qr-card img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+  .qr-card span { display: block; font-size: calc(var(--u) * 1.05); color: #131211; letter-spacing: 0.04em; margin-top: calc(var(--u) * 0.15); }
+
+  /* ---- Full-screen states: pairing, idle, inactive, connecting ---------- */
+  .screen { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center;
+            background: radial-gradient(ellipse at 50% 30%, #17171a 0%, #0b0b0c 60%, #060606 100%); }
+  .screen.on { display: flex; }
+  .wordmark { position: absolute; top: calc(var(--u) * 4); left: calc(var(--u) * 4.5); font-size: calc(var(--u) * 1.7); letter-spacing: 0.02em; color: var(--ink-dim); }
+  .wordmark b { color: var(--ink); font-weight: 650; }
+  .wordmark .dot { display: inline-block; width: 0.42em; height: 0.42em; border-radius: 50%; background: var(--accent); margin: 0 0.5em 0.08em 0; }
+
+  .pair { display: flex; align-items: center; gap: calc(var(--u) * 7); text-align: left; padding: calc(var(--u) * 4); }
+  #stage.portrait .pair { flex-direction: column; text-align: center; gap: calc(var(--u) * 5); }
+  .pair-qr { background: #fff; padding: calc(var(--u) * 1.2); border-radius: calc(var(--u) * 1.2); box-shadow: 0 calc(var(--u) * 1.5) calc(var(--u) * 5) rgba(0,0,0,0.5); flex: none; }
+  .pair-qr img { display: block; width: calc(var(--u) * 30); height: calc(var(--u) * 30); image-rendering: pixelated; }
+  .pair-qr .ph { width: calc(var(--u) * 30); height: calc(var(--u) * 30); display: flex; align-items: center; justify-content: center; color: #999; font-size: calc(var(--u) * 1.4); }
+  .pair-text { max-width: calc(var(--u) * 62); }
+  .pair-kicker { font-size: calc(var(--u) * 1.5); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-faint); }
+  .pair-title { font-family: var(--serif); font-weight: 400; font-size: calc(var(--u) * 4.4); line-height: 1.12; margin: calc(var(--u) * 1.2) 0 calc(var(--u) * 2.4); }
+  .pair-step { font-size: calc(var(--u) * 1.8); color: var(--ink-dim); line-height: 1.5; }
+  .pair-step b { color: var(--ink); font-weight: 600; }
+  .pair-code { font-family: var(--mono); font-size: calc(var(--u) * 7.2); letter-spacing: 0.12em; font-weight: 600; margin: calc(var(--u) * 1.6) 0 calc(var(--u) * 1.2);
+               color: #fff; font-variant-numeric: tabular-nums; }
+  .pair-code .dash { color: var(--accent); }
+  .pair-meta { font-size: calc(var(--u) * 1.45); color: var(--ink-faint); margin-top: calc(var(--u) * 2); line-height: 1.6; }
+  .pair-err { font-size: calc(var(--u) * 1.5); color: #f0a77a; margin-top: calc(var(--u) * 1.4); min-height: 1.5em; }
+  /* Try a sample gallery: secondary, never competing with the code. */
+  .pair-actions { margin-top: calc(var(--u) * 2.2); display: flex; align-items: center; gap: calc(var(--u) * 1.6); flex-wrap: wrap; }
+  #stage.portrait .pair-actions { justify-content: center; }
+  .pair-sample { border: 1px solid rgba(255,255,255,0.28); background: rgba(255,255,255,0.05); color: var(--ink); border-radius: 999px;
+                 padding: calc(var(--u) * 0.9) calc(var(--u) * 2.4); font-size: calc(var(--u) * 1.7); cursor: pointer; }
+  .pair-sample:hover, .pair-sample:focus-visible { border-color: var(--accent); background: rgba(43,127,245,0.16); outline: none; }
+  .pair-hint { font-size: calc(var(--u) * 1.3); color: var(--ink-faint); }
+  .pair-hint.tv { display: none; }
+  body.receiver .pair-sample, body.receiver .pair-hint.web { display: none; }
+  body.receiver .pair-hint.tv { display: inline; }
+
+  /* While the sample plays: the way to link stays on the wall, small, in a corner. */
+  #sampleCard { position: absolute; display: none; align-items: center; gap: calc(var(--u) * 1.3); z-index: 5; max-width: 52%;
+                padding: calc(var(--u) * 0.9) calc(var(--u) * 1.4) calc(var(--u) * 0.9) calc(var(--u) * 0.9);
+                background: rgba(14, 13, 12, 0.74); -webkit-backdrop-filter: blur(calc(var(--u) * 1.2)); backdrop-filter: blur(calc(var(--u) * 1.2));
+                border: 1px solid rgba(255,255,255,0.08); border-radius: calc(var(--u) * 0.8); color: #f3f0ea; text-align: left;
+                transform: translate(var(--bx), var(--by)); transition: transform 4s ease-in-out; box-shadow: 0 calc(var(--u) * 0.6) calc(var(--u) * 2.2) rgba(0,0,0,0.35); }
+  #sampleCard.on { display: flex; }
+  #sampleCard img { display: block; width: calc(var(--u) * 8); height: calc(var(--u) * 8); background: #fff; padding: calc(var(--u) * 0.35);
+                    border-radius: calc(var(--u) * 0.4); image-rendering: pixelated; flex: none; }
+  #sampleCard .k { font-size: calc(var(--u) * 1.05); letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
+  #sampleCard .t { font-size: calc(var(--u) * 1.45); line-height: 1.4; margin-top: calc(var(--u) * 0.3); }
+  #sampleCard .code { font-family: var(--mono); font-weight: 600; letter-spacing: 0.06em; white-space: nowrap; }
+  .device-id { position: absolute; bottom: calc(var(--u) * 3); left: 0; right: 0; text-align: center; font-family: var(--mono); font-size: calc(var(--u) * 1.15); color: rgba(236,233,227,0.25); }
+
+  .center-block { transform: translate(var(--bx), var(--by)); transition: transform 4s ease-in-out; padding: calc(var(--u) * 4); }
+  .idle-clock { font-size: calc(var(--u) * 13); font-weight: 200; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: rgba(236,233,227,0.92); line-height: 1; }
+  .idle-ready { font-size: calc(var(--u) * 1.5); letter-spacing: 0.3em; text-transform: uppercase; color: var(--accent); margin-top: calc(var(--u) * 3.2); }
+  .idle-name { font-family: var(--serif); font-size: calc(var(--u) * 3.4); margin-top: calc(var(--u) * 1.4); }
+  .idle-owner { font-size: calc(var(--u) * 1.6); color: var(--ink-faint); margin-top: calc(var(--u) * 0.8); }
+  .notice-title { font-family: var(--serif); font-size: calc(var(--u) * 4.2); line-height: 1.15; }
+  .notice-body { font-size: calc(var(--u) * 1.9); color: var(--ink-dim); margin-top: calc(var(--u) * 2); line-height: 1.55; max-width: calc(var(--u) * 70); }
+  .notice-body b { color: var(--ink); font-weight: 600; }
+
+  #loading { position: absolute; left: 50%; top: 50%; width: calc(var(--u) * 1.1); height: calc(var(--u) * 1.1); margin: calc(var(--u) * -0.55);
+             border-radius: 50%; background: var(--accent); opacity: 0; transition: opacity 0.6s; pointer-events: none; }
+  #loading.on { opacity: 0.8; animation: breathe 1.8s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { transform: scale(0.7); opacity: 0.35; } 50% { transform: scale(1.15); opacity: 0.9; } }
+
+  #blackout { position: absolute; inset: 0; background: #000; display: none; }
+  #blackout.on { display: block; }
+  #blackout .tiny { position: absolute; right: 12px; bottom: 10px; font: 11px var(--mono); color: rgba(255,255,255,0.22); display: none; }
+  body.debug #blackout .tiny { display: block; }
+
+  #identify { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
+              background: rgba(0,0,0,0.72); text-align: center; }
+  #identify.on { display: flex; }
+  #identify .who { font-family: var(--serif); font-size: calc(var(--u) * 11); line-height: 1.05; padding: 0 calc(var(--u) * 5); animation: pulse 1.5s ease-in-out infinite; }
+  #identify .sub { font-size: calc(var(--u) * 1.8); letter-spacing: 0.24em; text-transform: uppercase; color: var(--accent); margin-top: calc(var(--u) * 2.4); }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.72; transform: scale(0.985); } }
+
+  #offline { position: absolute; left: calc(var(--u) * 1.4); bottom: calc(var(--u) * 1.4); width: calc(var(--u) * 0.7); height: calc(var(--u) * 0.7); min-width: 6px; min-height: 6px;
+             border-radius: 50%; background: #e0773c; opacity: 0; transition: opacity 0.8s; pointer-events: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.35); }
+  #offline.on { opacity: 0.85; }
+
+  /* ---- Chrome: controls that withdraw ---------------------------------- */
+  #chrome { position: fixed; top: 14px; right: 14px; display: flex; gap: 8px; z-index: 20; transition: opacity 0.6s; }
+  body.idle-cursor #chrome { opacity: 0; pointer-events: none; }
+  .chip { border: 1px solid rgba(255,255,255,0.14); background: rgba(16,16,18,0.6); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+          border-radius: 999px; height: 36px; min-width: 36px; padding: 0 12px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+          font-size: 13px; color: #eee; cursor: pointer; }
+  .chip:hover { border-color: rgba(255,255,255,0.3); }
+  .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .chip svg { width: 16px; height: 16px; }
+  #soundHint { display: none; }
+  body.sound-blocked #soundHint { display: inline-flex; }
+
+  /* ---- Settings panel --------------------------------------------------- */
+  #settings { position: fixed; top: 60px; right: 14px; width: 340px; max-width: calc(100vw - 28px); max-height: calc(100vh - 80px); overflow: auto;
+              background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; z-index: 21; display: none;
+              box-shadow: 0 20px 60px rgba(0,0,0,0.5); font-size: 13px; }
+  #settings.on { display: block; }
+  #settings h2 { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+  #settings label { display: block; margin: 12px 0 4px; color: rgba(255,255,255,0.65); font-size: 12px; }
+  #settings input[type=text], #settings input[type=url], #settings input[type=number], #settings select {
+    width: 100%; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 8px 10px; }
+  #settings .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+  #settings .row label { margin: 0; color: inherit; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+  #settings .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .btn { border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.danger { color: #ffb4a0; border-color: rgba(255,140,110,0.35); }
+  #settings .help { color: rgba(255,255,255,0.45); font-size: 11.5px; margin-top: 6px; line-height: 1.45; }
+  #settings kbd { font: 11px var(--mono); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 0 4px; }
+
+  /* ---- Debug panel ------------------------------------------------------ */
+  #debug { position: fixed; top: 0; left: 0; bottom: 0; width: 430px; max-width: 92vw; background: rgba(8,8,10,0.9); border-right: 1px solid var(--line);
+           -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); z-index: 19; display: none; overflow: auto; padding: 12px 14px 20px;
+           font: 11.5px/1.5 var(--mono); color: #cfd3d8; }
+  body.debug #debug { display: block; }
+  #debug h3 { font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: 0.12em; color: rgba(255,255,255,0.45); margin: 14px 0 4px; }
+  #debug .kv { display: grid; grid-template-columns: 118px 1fr; gap: 0 8px; }
+  #debug .kv span:nth-child(odd) { color: rgba(255,255,255,0.45); }
+  #debug .kv span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #debug .bar { height: 4px; background: rgba(255,255,255,0.08); border-radius: 2px; margin: 4px 0; overflow: hidden; }
+  #debug .bar i { display: block; height: 100%; background: var(--accent); }
+  #debug .ok { color: #8fd6a0; } #debug .warn { color: #f0c27a; } #debug .bad { color: #f39a85; }
+  #debug .log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* The layers carry z-index 1 and 2 inline (one dissolves over the other), so
+     everything drawn over the art states its own place above them. */
+  .screen { z-index: 3; }
+  #blackout { z-index: 6; }
+  #identify { z-index: 7; }
+  #offline { z-index: 8; }
+
+  /* Sample gallery and receiver (Chromecast) modes. */
+  #btnStopSample { display: none; }
+  body.sample #btnStopSample { display: inline-flex; }
+  body.receiver #chrome, body.receiver #settings, body.receiver #debug { display: none !important; }
+  body.receiver, body.receiver * { cursor: none !important; }
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="stage">
+    <div class="layer" id="layerA"></div>
+    <div class="layer" id="layerB"></div>
+    <div id="loading"></div>
+
+    <!-- First run: register this screen -->
+    <div class="screen" id="screenPairing">
+      <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+      <div class="pair">
+        <div class="pair-qr"><img id="pairQr" alt="QR code to link this screen" hidden><div class="ph" id="pairQrPh">Asking for a code…</div></div>
+        <div class="pair-text">
+          <div class="pair-kicker">New screen</div>
+          <div class="pair-title">Register this screen to your SolPersona account</div>
+          <div class="pair-step">Scan the code with your phone, or go to <b id="pairHost">—</b> and enter</div>
+          <div class="pair-code" id="pairCode">····<span class="dash">-</span>····</div>
+          <div class="pair-meta"><span id="pairUrl"></span><br><span id="pairExpiry"></span></div>
+          <div class="pair-actions">
+            <button class="pair-sample" id="btnSample" type="button">Try a sample gallery</button>
+            <span class="pair-hint web">or press <b>T</b></span>
+            <span class="pair-hint tv">To see a sample first, choose “Play the sample on the TV” where you started casting.</span>
+          </div>
+          <div class="pair-err" id="pairErr"></div>
+        </div>
+      </div>
+      <div class="device-id" id="pairDevice"></div>
+    </div>
+
+    <!-- Linked, nothing to play -->
+    <div class="screen" id="screenIdle">
+      <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+      <div class="center-block">
+        <div class="idle-clock" id="idleClock">--:--</div>
+        <div class="idle-ready" id="idleReady">Ready</div>
+        <div class="idle-name" id="idleName"></div>
+        <div class="idle-owner" id="idleOwner"></div>
+      </div>
+    </div>
+
+    <!-- Linked, but not covered on the account (status UNLICENSED). Store-safe
+         wording, exactly as SPEC §11c: nothing about buying, prices or plans. -->
+    <div class="screen" id="screenUnlicensed">
+      <div class="wordmark"><span class="dot"></span><b>SolPersona</b> Gallery</div>
+      <div class="center-block">
+        <div class="notice-title">This screen isn't active on your account yet.</div>
+        <div class="notice-body">The account owner can manage their screens at <span id="inactiveHost">solpersona.com</span>.</div>
+        <div class="idle-owner" id="inactiveName" style="margin-top: calc(var(--u) * 4)"></div>
+      </div>
+    </div>
+
+    <!-- While the sample gallery plays: how to link, small, in a free corner -->
+    <div id="sampleCard" aria-live="polite">
+      <img id="sampleQr" alt="QR code to link this screen" hidden>
+      <div>
+        <div class="k">Sample gallery</div>
+        <div class="t">Link this screen — <span id="sampleHost"></span><span id="sampleCodeSep"> · </span><span class="code" id="sampleCode"></span></div>
+      </div>
+    </div>
+
+    <div id="blackout"><div class="tiny" id="blackoutClock"></div></div>
+    <div id="identify"><div class="who" id="identifyName"></div><div class="sub">This screen</div></div>
+    <div id="offline" title="Offline — playing by the last clock"></div>
+  </div>
+</div>
+
+<div id="chrome">
+  <button class="chip" id="btnStopSample" title="Back to the pairing screen (Esc)">Stop sample</button>
+  <button class="chip" id="soundHint" title="The browser blocked sound until you interact">Enable sound</button>
+  <button class="chip" id="btnDebug" title="Debug panel (D)">Debug</button>
+  <button class="chip" id="btnFull" title="Full screen (F)" aria-label="Full screen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  </button>
+  <button class="chip" id="btnSettings" title="Settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+</div>
+
+<div id="settings" role="dialog" aria-label="Simulator settings">
+  <h2>Simulator</h2>
+  <label for="setBase">SolPersona address</label>
+  <input id="setBase" type="url" spellcheck="false" placeholder="https://solpersona.com">
+  <div class="help">Changing it forgets this screen's credential here — a screen belongs to one SolPersona.</div>
+  <label for="setRes">Screen</label>
+  <select id="setRes"></select>
+  <label for="setName">Name offered when registering</label>
+  <input id="setName" type="text" maxlength="60" placeholder="e.g. Front window">
+  <label for="setStorage">Storage to report (MB)</label>
+  <input id="setStorage" type="number" min="0" step="100" placeholder="estimated from the browser">
+  <div class="help" id="setPersist"></div>
+  <div class="row"><label><input id="setOriginals" type="checkbox"> Room for originals (<code>capabilities.originals</code>)</label></div>
+  <div class="help">Platform <code id="setPlatform"></code> · app <code id="setApp"></code> · device <span id="setDevice">—</span></div>
+  <div class="buttons">
+    <button class="btn primary" id="btnSave">Save</button>
+    <button class="btn" id="btnReload" title="R">Reload playlist</button>
+    <button class="btn danger" id="btnForget">Forget this screen</button>
+  </div>
+  <div class="help" style="margin-top:14px"><kbd>D</kbd> debug · <kbd>F</kbd> full screen · <kbd>R</kbd> reload · <kbd>S</kbd> settings · <kbd>T</kbd> sample gallery · <kbd>Esc</kbd> close / stop sample</div>
+
+  <h2 style="margin-top:22px">Show on a TV</h2>
+  <div class="help" id="castNote">Checking for Google Cast…</div>
+  <div class="buttons" style="margin-top:10px">
+    <button class="btn primary" id="btnCast" hidden>Cast to a Chromecast</button>
+    <button class="btn" id="btnCastSample" hidden>Play the sample on the TV</button>
+    <button class="btn danger" id="btnCastStop" hidden>Stop casting</button>
+  </div>
+  <div class="help" style="margin-top:12px">AirPlay: on a Mac or iPhone, mirror this window to an Apple TV or an AirPlay-capable TV (many Roku, Samsung and LG models) from Control Centre → Screen Mirroring.</div>
+</div>
+
+<div id="debug"></div>
+
+<script>
+'use strict';
+/* =============================================================================
+ * SolPersona Gallery — the player.
+ *
+ *   0. Utilities           5. Cache / prefetch      5b. Kept on the device
+ *   1. Config + storage    6. Renderer (layers, fit, frame, label, QR)
+ *   2. API                 7. The tick: what should be on screen now
+ *   3. Clock + timeline    8. Pairing               8b. Sample gallery
+ *   4. Sync (the poll)     9. Chrome, settings, keyboard, debug, boot
+ *                         10. Show on a TV: Google Cast sender + receiver mode
+ *
+ * A native player should be able to port this section by section. Every rule
+ * here comes from docs/GALLERY-SCREENS.md; where this file makes a choice the
+ * contract leaves open, a comment says so.
+ * ========================================================================== */
+(function () {
+
+  /* ===========================================================================
+   * 0. Utilities
+   * ========================================================================= */
+
+  var $ = function (id) { return document.getElementById(id); };
+  var noop = function () {};
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text); // never innerHTML with show data
+    return node;
+  }
+
+  function esc(value) {
+    return String(value === undefined || value === null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function fmtDuration(ms) {
+    if (ms === null || ms === undefined || !isFinite(ms)) return '—';
+    var s = Math.max(0, Math.round(ms / 1000));
+    var m = Math.floor(s / 60);
+    return m + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function hhmm(date) { return pad2(date.getHours()) + ':' + pad2(date.getMinutes()); }
+  function hhmmss(date) { return hhmm(date) + ':' + pad2(date.getSeconds()); }
+
+  /** Small stable hash for cache keys. */
+  function hash(str) {
+    var h = 5381;
+    for (var i = 0; i < str.length; i += 1) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+
+  function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+  /* ===========================================================================
+   * 1. Config + storage
+   *
+   * localStorage is a convenience: every read and write is guarded, and the
+   * player still works (re-pairing on every load) where storage is refused.
+   * ========================================================================= */
+
+  /**
+   * Receiver mode: /cast-receiver serves this file to a Chromecast with
+   * SOLPERSONA_RECEIVER set. It is then a real screen of its own — it registers,
+   * pairs and plays exactly as below — with the simulator's chrome hidden.
+   */
+  var RECEIVER = window.SOLPERSONA_RECEIVER === true;
+  var PLATFORM = RECEIVER ? 'chromecast' : 'web-simulator';
+  var APP_VERSION = RECEIVER ? 'cast-1.0' : 'sim-1.1';
+  var KEYS = {
+    config: 'sps.sim.config',
+    device: 'sps.sim.device',   // { baseUrl, deviceId, token, ackSeq }
+    pairing: 'sps.sim.pairing', // an unexpired registration, so a reload keeps its code
+    show: 'sps.sim.show',       // the last playlist, so a restart while offline still plays
+    kept: 'sps.sim.kept',       // keepOffline: { baseUrl, deviceId, on, files: { url: bytes } } (section 5b)
+  };
+
+  /**
+   * Can this page keep a whole show across restarts (SPEC §11a)? Cache Storage
+   * exists only in a secure context (https, or http://localhost), so a LAN
+   * address over plain http honestly reports false and streams.
+   */
+  var canPersist = /^https?:$/.test(location.protocol) && typeof window.caches !== 'undefined' && !!window.caches;
+
+  var store = {
+    get: function (key, fallback) {
+      try { var raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
+    },
+    set: function (key, value) {
+      try {
+        if (value === null || value === undefined) localStorage.removeItem(key);
+        else localStorage.setItem(key, JSON.stringify(value));
+      } catch (e) { /* full or refused: carry on in memory */ }
+    },
+  };
+
+  var RESOLUTIONS = {
+    window: { label: 'This window (native)' },
+    '720p': { w: 1280, h: 720, label: '720p · 1280×720' },
+    '1080p': { w: 1920, h: 1080, label: '1080p · 1920×1080' },
+    '4k': { w: 3840, h: 2160, label: '4K · 3840×2160' },
+    portrait: { w: 1080, h: 1920, label: 'Portrait 1080 · 1080×1920' },
+    portrait4k: { w: 2160, h: 3840, label: 'Portrait 4K · 2160×3840' },
+  };
+
+  function defaultBase() {
+    return /^https?:$/.test(location.protocol) ? location.origin : 'http://localhost:8080';
+  }
+  function normaliseBase(url) { return String(url || '').trim().replace(/\/+$/, ''); }
+
+  var config = Object.assign(
+    { baseUrl: defaultBase(), resolution: 'window', name: '', originals: true, storageMb: null, debug: false },
+    store.get(KEYS.config, {})
+  );
+  config.baseUrl = normaliseBase(config.baseUrl) || defaultBase();
+  if (!RESOLUTIONS[config.resolution]) config.resolution = 'window';
+  // A Chromecast is its own panel: native size, no debug overlay on somebody's TV.
+  if (RECEIVER) { config.resolution = 'window'; config.debug = false; }
+  function saveConfig() { store.set(KEYS.config, config); }
+
+  /** The screen's credential. It belongs to one SolPersona origin. */
+  var device = store.get(KEYS.device, null);
+  if (device && (device.baseUrl !== config.baseUrl || !device.token)) device = null;
+  function saveDevice() { store.set(KEYS.device, device); }
+
+  var estimatedStorageMb = 2000;
+
+  /** The simulated screen in physical pixels. */
+  function simSize() {
+    var r = RESOLUTIONS[config.resolution];
+    if (!r || !r.w) {
+      var dpr = window.devicePixelRatio || 1;
+      return { w: Math.max(1, Math.round(window.innerWidth * dpr)), h: Math.max(1, Math.round(window.innerHeight * dpr)) };
+    }
+    return { w: r.w, h: r.h };
+  }
+
+  function capabilities() {
+    var size = simSize();
+    var storageMb = typeof config.storageMb === 'number' && config.storageMb >= 0 ? config.storageMb : estimatedStorageMb;
+    return {
+      screenWidth: Math.min(20000, size.w),
+      screenHeight: Math.min(20000, size.h),
+      storageMb: Math.min(10000000, Math.round(storageMb)),
+      video: true,
+      originals: !!config.originals,
+      persistentStorage: canPersist,
+    };
+  }
+
+  /* ===========================================================================
+   * 2. API
+   *
+   * Every call goes through `api`, which times it and writes it to the debug
+   * log. `credentials: 'omit'`: a screen carries its own Bearer credential and
+   * must never ride a browser session, even when served from SolPersona itself.
+   * ========================================================================= */
+
+  var callLog = []; // { at, method, path, status, ms, note }
+  function logCall(method, path, status, ms, note) {
+    callLog.unshift({ at: new Date(), method: method, path: path, status: status, ms: Math.round(ms), note: note || '' });
+    if (callLog.length > 80) callLog.length = 80;
+  }
+
+  function api(method, path, body, opts) {
+    opts = opts || {};
+    var headers = {};
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (opts.auth !== false && device && device.token) headers.Authorization = 'Bearer ' + device.token;
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, opts.timeoutMs || 15000) : null;
+    var sentAt = Date.now();
+    var t0 = performance.now();
+    return fetch(config.baseUrl + path, {
+      method: method,
+      headers: headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      mode: 'cors',
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: controller ? controller.signal : undefined,
+    }).then(function (res) {
+      var receivedAt = Date.now();
+      var asBlob = !!opts.blob && res.ok; // an error is JSON even where a PNG was asked for
+      var isJson = (res.headers.get('content-type') || '').indexOf('json') >= 0;
+      var reader = asBlob ? res.blob() : (isJson ? res.json().catch(function () { return null; }) : Promise.resolve(null));
+      return reader.then(function (payload) {
+        if (timer) clearTimeout(timer);
+        var data = asBlob ? null : payload;
+        var code = data && data.error ? data.error.code : '';
+        logCall(method, path, res.status, performance.now() - t0, code);
+        return {
+          status: res.status, ok: res.ok, sentAt: sentAt, receivedAt: receivedAt,
+          data: data, blob: asBlob ? payload : null,
+          code: code, message: data && data.error ? data.error.message : '',
+        };
+      });
+    }, function (error) {
+      if (timer) clearTimeout(timer);
+      logCall(method, path, 'ERR', performance.now() - t0, error && error.name === 'AbortError' ? 'timeout' : 'network');
+      var err = new Error('network');
+      err.network = true;
+      throw err;
+    });
+  }
+
+  /* ===========================================================================
+   * 3. Clock + timeline — mirrors src/lib/screen-timeline.ts exactly.
+   * ========================================================================= */
+
+  /**
+   * offset = serverTime − (sentAt + receivedAt) / 2, smoothed as the median of
+   * the last five samples so one slow poll cannot throw the screen off.
+   */
+  var clock = {
+    samples: [],
+    offset: 0,
+    rtt: null,
+    synced: false,
+    add: function (serverTime, sentAt, receivedAt) {
+      if (typeof serverTime !== 'number') return;
+      this.samples.push(serverTime - (sentAt + receivedAt) / 2);
+      if (this.samples.length > 5) this.samples.shift();
+      var sorted = this.samples.slice().sort(function (a, b) { return a - b; });
+      this.offset = sorted[Math.floor(sorted.length / 2)];
+      this.rtt = receivedAt - sentAt;
+      this.synced = true;
+    },
+    now: function () { return Date.now() + this.offset; },
+  };
+
+  function timelineLength(timeline) {
+    return timeline.reduce(function (sum, slot) { return sum + slot.ms; }, 0);
+  }
+
+  /** When slot `index` starts, measured from position zero of one lap. */
+  function startOf(timeline, index) {
+    var at = 0;
+    for (var i = 0; i < index && i < timeline.length; i += 1) at += timeline[i].ms;
+    return at;
+  }
+
+  /** Where the show is at `nowMs`, by the clock. { index, offsetMs, lap } or null. */
+  function positionAt(timeline, clockState, nowMs) {
+    var total = timelineLength(timeline);
+    if (timeline.length === 0 || total <= 0) return null;
+    var at = (clockState.pausedAtMs !== null && clockState.pausedAtMs !== undefined ? clockState.pausedAtMs : nowMs) - clockState.epochMs;
+    var lap = Math.floor(at / total);
+    var into = at - lap * total;
+    for (var index = 0; index < timeline.length; index += 1) {
+      var ms = timeline[index].ms;
+      if (into < ms) return { index: index, offsetMs: into, lap: lap };
+      into -= ms;
+    }
+    return { index: timeline.length - 1, offsetMs: timeline[timeline.length - 1].ms, lap: lap };
+  }
+
+  /* ===========================================================================
+   * 4. Sync — the poll
+   * ========================================================================= */
+
+  var S = {
+    mode: 'boot',          // boot | pairing | player
+    status: null,          // IDLE | PLAYING | UNLICENSED (null until the first answer)
+    deviceInfo: null,      // { id, name, owner }
+    show: null,            // { id, version, sourceRef, epochMs, pausedAtMs, settings, items, timeline, byId }
+    takeover: null,        // { item, settings, startedAt, until }
+    ackSeq: device && device.ackSeq ? device.ackSeq : 0,
+    pendingDurations: {},  // itemId → ms, sent with the next poll
+    reportedDurations: {}, // itemId → true, so each video is reported once
+    online: true,
+    failures: 0,
+    pollMs: 3000,
+    lastSyncAt: null,
+    nextSyncAt: null,
+    forceFull: false,      // send version null: "send me the playlist again"
+    syncSoon: false,
+    lastError: null,
+    holding: null,         // why the screen is holding the current piece
+    target: null,          // what the clock says should be on screen
+    identifyUntil: 0,
+    soundBlocked: false,
+    blackout: false,
+    handledCommands: [],   // for the debug panel
+  };
+
+  var syncTimer = null;
+  var syncing = false;
+
+  function scheduleSync(ms) {
+    clearTimeout(syncTimer);
+    S.nextSyncAt = Date.now() + ms;
+    syncTimer = setTimeout(syncOnce, ms);
+  }
+  function stopSync() { clearTimeout(syncTimer); syncTimer = null; S.nextSyncAt = null; }
+
+  function reportState() {
+    var cur = layers[front];
+    var t = S.target;
+    var shownIndex = cur.target && typeof cur.target.index === 'number' ? cur.target.index : null;
+    var state = {
+      itemId: cur.item ? cur.item.id : null,
+      index: shownIndex,
+      paused: !!(t && t.paused),
+      cached: countReady(),
+      bufferedAhead: bufferedAhead(),
+      error: S.lastError || kept.error,
+      visible: !S.blackout && document.visibilityState !== 'hidden',
+    };
+    if (kept.on) {
+      // "Stored on the screen: 12 of 40" on the owner's dashboard (§11a).
+      var counts = keptCounts();
+      state.stored = counts.stored;
+      state.total = counts.total;
+    }
+    return state;
+  }
+
+  /*
+   * What played while out of touch (SPEC §4.1 `plays`). A screen keeping its
+   * gallery on board plays straight through an outage, and on a commercial
+   * screen the artists are paid for that time — so it is written down while
+   * offline, in server time from the clock, and sent with the first poll that
+   * gets through. Only while visible: a dark screen showed nobody anything.
+   */
+  var playLog = [];
+  function logOfflinePlay() {
+    if (S.mode !== 'player' || S.online || S.blackout || document.visibilityState === 'hidden') return;
+    var cur = layers[front];
+    var id = cur && cur.item ? cur.item.id : null;
+    if (!id) return;
+    var now = clock.now();
+    var last = playLog[playLog.length - 1];
+    if (last && last.itemId === id && now - last.end < 5000) last.end = now;
+    else if (playLog.length < 2000) playLog.push({ itemId: id, startedAt: now, end: now });
+  }
+
+  function syncOnce() {
+    if (S.mode !== 'player' || !device || syncing) return;
+    syncing = true;
+    var durations = Object.keys(S.pendingDurations).slice(0, 50).map(function (id) {
+      return { itemId: id, ms: S.pendingDurations[id] };
+    });
+    var full = S.forceFull || !S.show;
+    var sentPlays = playLog.length;
+    var body = {
+      showId: full ? null : S.show.id,
+      version: full ? null : S.show.version,
+      ackSeq: S.ackSeq,
+      durations: durations,
+      state: reportState(),
+      capabilities: capabilities(),
+      appVersion: APP_VERSION,
+    };
+    if (sentPlays > 0) {
+      body.plays = playLog.slice(0, sentPlays).map(function (entry) {
+        return { itemId: entry.itemId, startedAt: Math.round(entry.startedAt), ms: Math.max(0, Math.round(entry.end - entry.startedAt)) };
+      });
+    }
+    var next = S.pollMs;
+    api('POST', '/api/v1/device/sync', body).then(function (r) {
+      if (r.status === 401 && (r.code === 'SCREEN_NOT_LINKED' || r.code === 'UNAUTHENTICATED')) {
+        unlinkLocally();
+        return 'stop';
+      }
+      if (!r.ok || !r.data) {
+        var err = new Error(r.code || ('HTTP ' + r.status));
+        err.status = r.status;
+        throw err;
+      }
+      var data = r.data;
+      clock.add(data.serverTime, r.sentAt, r.receivedAt);
+      durations.forEach(function (d) { delete S.pendingDurations[d.itemId]; });
+      // Reported: what was sent is the server's now.
+      if (sentPlays > 0) playLog.splice(0, sentPlays);
+      S.online = true;
+      S.failures = 0;
+      if (S.lastError && S.lastError.indexOf('could not load') !== 0) S.lastError = null;
+      S.lastSyncAt = Date.now();
+      S.forceFull = false;
+      S.pollMs = data.pollMs > 0 ? data.pollMs : 3000;
+      S.status = data.status;
+      S.deviceInfo = data.device || S.deviceInfo;
+      applyShow(data.status === 'UNLICENSED' ? null : data.show);
+      // Only a real answer switches keeping on or off: a screen that boots with
+      // no network keeps what it holds until the server says otherwise.
+      setKeepOffline(!!(data.device && data.device.keepOffline === true));
+      S.takeover = data.takeover || null;
+      handleCommands(data.commands || []);
+      next = S.pollMs;
+      if (S.syncSoon) { S.syncSoon = false; next = 50; }
+      tick();
+      return null;
+    }).catch(function (error) {
+      // Offline, or the server answered with an error: keep playing by the
+      // last clock (local time + last offset) and try again with backoff.
+      S.online = false;
+      S.failures += 1;
+      S.lastError = error && error.network ? 'offline' : (error && error.message) || 'sync failed';
+      var backoff = error && error.status === 429 ? 15000 : Math.min(60000, 3000 * Math.pow(2, S.failures - 1));
+      next = backoff;
+      return null;
+    }).then(function (outcome) {
+      syncing = false;
+      if (outcome !== 'stop' && S.mode === 'player') scheduleSync(next);
+    });
+  }
+
+  function syncNow() { if (!syncing) scheduleSync(0); else S.syncSoon = true; }
+
+  /** Takes the `show` part of a poll answer. The playlist only comes when ours differs. */
+  function applyShow(incoming) {
+    var prev = S.show;
+    if (!incoming) {
+      if (prev) { S.show = null; saveSnapshot(); }
+      return;
+    }
+    if (incoming.items && incoming.timeline && incoming.settings) {
+      var changed = !prev || prev.id !== incoming.id || prev.version !== incoming.version;
+      S.show = {
+        id: incoming.id,
+        version: incoming.version,
+        sourceRef: incoming.sourceRef,
+        epochMs: incoming.epochMs,
+        pausedAtMs: incoming.pausedAtMs === undefined ? null : incoming.pausedAtMs,
+        settings: incoming.settings,
+        items: incoming.items,
+        timeline: incoming.timeline,
+        byId: indexItems(incoming.items),
+      };
+      if (changed && prev && prev.settings && prev.settings.qrTarget !== incoming.settings.qrTarget) clearQrCache();
+      saveSnapshot();
+      return;
+    }
+    if (prev && prev.id === incoming.id) {
+      var moved = prev.epochMs !== incoming.epochMs || prev.pausedAtMs !== incoming.pausedAtMs;
+      prev.version = incoming.version;
+      prev.sourceRef = incoming.sourceRef;
+      prev.epochMs = incoming.epochMs;
+      prev.pausedAtMs = incoming.pausedAtMs === undefined ? null : incoming.pausedAtMs;
+      if (moved) saveSnapshot();
+      return;
+    }
+    // A show we do not hold and no playlist with it — ask again for the whole thing.
+    S.forceFull = true;
+    S.syncSoon = true;
+  }
+
+  function indexItems(items) {
+    var map = {};
+    items.forEach(function (item) { map[item.id] = item; });
+    return map;
+  }
+
+  function saveSnapshot() {
+    if (S.mode === 'sample') return; // the sample is never this screen's own playlist
+    if (!S.show) { store.set(KEYS.show, null); return; }
+    store.set(KEYS.show, {
+      baseUrl: config.baseUrl,
+      deviceId: device ? device.deviceId : null,
+      offset: clock.offset,
+      show: {
+        id: S.show.id, version: S.show.version, sourceRef: S.show.sourceRef, epochMs: S.show.epochMs,
+        pausedAtMs: S.show.pausedAtMs, settings: S.show.settings, items: S.show.items, timeline: S.show.timeline,
+      },
+    });
+  }
+
+  function loadSnapshot() {
+    var snap = store.get(KEYS.show, null);
+    if (!snap || !snap.show || snap.baseUrl !== config.baseUrl || !device || snap.deviceId !== device.deviceId) return;
+    S.show = Object.assign({}, snap.show, { byId: indexItems(snap.show.items || []) });
+    if (typeof snap.offset === 'number') clock.offset = snap.offset;
+  }
+
+  /** identify · reload · clear-cache, each once, in order; then acknowledged with ackSeq. */
+  function handleCommands(commands) {
+    var acted = false;
+    commands.slice().sort(function (a, b) { return a.seq - b.seq; }).forEach(function (command) {
+      if (command.seq <= S.ackSeq) return;
+      if (command.type === 'identify') {
+        S.identifyUntil = Date.now() + 6000;
+      } else if (command.type === 'reload') {
+        dropPlaylist();
+      } else if (command.type === 'clear-cache') {
+        clearCache();
+        // Files kept on the device are cached media too: start them again from
+        // nothing (useful when a stored file is damaged). What is on the wall
+        // is already decoded in memory and stays up.
+        if (kept.on) restartKept();
+      }
+      S.handledCommands.unshift({ seq: command.seq, type: command.type, at: new Date() });
+      if (S.handledCommands.length > 10) S.handledCommands.length = 10;
+      S.ackSeq = command.seq;
+      acted = true;
+    });
+    if (acted) {
+      if (device) { device.ackSeq = S.ackSeq; saveDevice(); }
+      S.syncSoon = true; // acknowledge promptly so the dashboard sees it done
+    }
+  }
+
+  /** "reload": forget the playlist and every cached file, ask for the show again. */
+  function dropPlaylist() {
+    S.show = null;
+    S.forceFull = true;
+    S.syncSoon = true;
+    store.set(KEYS.show, null);
+    clearLayers();
+    clearCache(true);
+    clearQrCache();
+  }
+
+  /* ===========================================================================
+   * 5. Cache / prefetch
+   *
+   * Entries are keyed by item id + the files chosen for it (a quality change is
+   * a different entry). Wanted: the piece on screen, the next `prefetch` in
+   * timeline order (wrapping), the previous one, and any takeover. Everything
+   * else is evicted. Loads run two at a time, most urgent first.
+   * ========================================================================= */
+
+  var cache = new Map(); // key → entry
+  var MAX_LOADING = 2;
+
+  function chooseCandidates(item, settings) {
+    var m = item.media || {};
+    var fallbacks = Array.isArray(m.fallbacks) ? m.fallbacks : [];
+    var list;
+    if (item.kind === 'VIDEO') {
+      list = [m.original].concat(fallbacks);
+    } else {
+      var q = settings.imageQuality;
+      var wide = simSize().w > 1280 && !!config.originals;
+      var preferOriginal = q === 'ORIGINAL' || (q !== 'DISPLAY' && wide);
+      list = (preferOriginal ? [m.original, m.display] : [m.display, m.original]).concat(fallbacks, [m.poster]);
+    }
+    var seen = {};
+    return list.filter(function (url) {
+      if (!url || seen[url]) return false;
+      seen[url] = true;
+      return true;
+    });
+  }
+
+  function entryKey(item, settings) {
+    return item.id + '#' + hash(chooseCandidates(item, settings).join('\n'));
+  }
+
+  function ensureEntry(item, settings) {
+    var key = entryKey(item, settings);
+    var entry = cache.get(key);
+    if (entry) {
+      if (entry.status === 'error' && Date.now() - entry.failedAt > 60000) {
+        // Try again a minute later, from the top (a video gets its film tried again, not only its still).
+        entry.status = 'queued';
+        entry.kind = item.kind;
+        entry.stillFallback = false;
+        entry.error = null;
+      }
+      return entry;
+    }
+    entry = {
+      key: key, id: item.id, item: item, kind: item.kind, candidates: chooseCandidates(item, settings),
+      status: 'queued', src: null, objectUrl: null, from: null, via: null, bytes: 0, el: null,
+      w: 0, h: 0, duration: null, error: null, failedAt: 0, dead: false, stillFallback: false,
+    };
+    cache.set(key, entry);
+    return entry;
+  }
+
+  function countReady() {
+    var n = 0;
+    cache.forEach(function (e) { if (e.status === 'ready') n += 1; });
+    return n;
+  }
+
+  function bufferedAhead() {
+    var plan = planned();
+    var n = 0;
+    for (var i = 1; i < plan.length; i += 1) {
+      if (plan[i].role !== 'next') continue;
+      var e = cache.get(entryKey(plan[i].item, plan[i].settings));
+      if (e && e.status === 'ready') n += 1;
+    }
+    return n;
+  }
+
+  /** What should be held, most urgent first. */
+  function planned() {
+    var out = [];
+    var tk = activeTakeover(clock.now());
+    if (tk) out.push({ item: tk.item, settings: tk.settings, role: 'takeover' });
+    var show = S.show;
+    if (show && show.timeline.length && S.status !== 'UNLICENSED') {
+      var pos = positionAt(show.timeline, show, clock.now());
+      if (pos) {
+        var n = show.timeline.length;
+        var push = function (index, role) {
+          var item = show.byId[show.timeline[index].id];
+          if (item && !out.some(function (p) { return p.item.id === item.id && p.settings === show.settings; })) {
+            out.push({ item: item, settings: show.settings, role: role });
+          }
+        };
+        push(pos.index, 'current');
+        var ahead = Math.min(show.settings.prefetch || 2, n - 1);
+        for (var i = 1; i <= ahead; i += 1) push((pos.index + i) % n, 'next');
+        if (n > 1) push((pos.index - 1 + n) % n, 'previous');
+      }
+    }
+    return out;
+  }
+
+  function manageCache() {
+    var plan = planned();
+    var keep = {};
+    plan.forEach(function (p) { keep[ensureEntry(p.item, p.settings).key] = true; });
+    layers.forEach(function (layer) { if (layer.entryKey) keep[layer.entryKey] = true; });
+    cache.forEach(function (entry, key) { if (!keep[key]) evict(entry); });
+
+    // Start loads in plan order, two at a time.
+    var loading = 0;
+    cache.forEach(function (e) { if (e.status === 'loading') loading += 1; });
+    for (var i = 0; i < plan.length && loading < MAX_LOADING; i += 1) {
+      var entry = cache.get(entryKey(plan[i].item, plan[i].settings));
+      if (entry && entry.status === 'queued') { loading += 1; startLoad(entry); }
+    }
+
+    // QR codes for what is on screen and what is next.
+    plan.slice(0, 2).forEach(function (p) { if (p.settings.qrTarget !== 'NONE') requestQr(p.item.id, p.settings.qrTarget); });
+    pruneQr(plan);
+
+    // keepOffline: the whole show, in the background, in whatever slots the
+    // pieces due now have left free (section 5b).
+    pumpKept(loading);
+  }
+
+  function evict(entry) {
+    entry.dead = true;
+    if (entry.objectUrl) { URL.revokeObjectURL(entry.objectUrl); entry.objectUrl = null; }
+    if (entry.stillObjectUrl) { URL.revokeObjectURL(entry.stillObjectUrl); entry.stillObjectUrl = null; }
+    if (entry.el) {
+      try { entry.el.pause(); entry.el.removeAttribute('src'); entry.el.load(); } catch (e) { /* already gone */ }
+      if (entry.el.parentNode) entry.el.parentNode.removeChild(entry.el);
+      entry.el = null;
+    }
+    cache.delete(entry.key);
+  }
+
+  /** "clear-cache": everything not on screen goes; what is on screen goes when it leaves. */
+  function clearCache(all) {
+    var inUse = {};
+    if (!all) layers.forEach(function (layer) { if (layer.entryKey) inUse[layer.entryKey] = true; });
+    cache.forEach(function (entry, key) { if (!inUse[key]) evict(entry); });
+  }
+
+  function startLoad(entry) {
+    entry.status = 'loading';
+    entry.error = null;
+    var job = entry.kind === 'VIDEO'
+      ? loadVideo(entry).then(function (ok) { return ok ? attachKeptStill(entry).then(function () { return ok; }) : ok; })
+      : loadImage(entry, entry.candidates);
+    job.then(function (ok) {
+      if (entry.dead) return;
+      if (ok) { entry.status = 'ready'; return; }
+      // A film that will not load still has a still: show the poster rather than nothing.
+      if (entry.kind === 'VIDEO') {
+        var m = entry.item.media || {};
+        var stills = [m.display, m.poster].filter(Boolean);
+        if (stills.length) {
+          entry.kind = 'IMAGE';
+          entry.stillFallback = true;
+          return loadImage(entry, stills).then(function (ok2) {
+            if (entry.dead) return;
+            if (ok2) entry.status = 'ready'; else fail(entry);
+          });
+        }
+      }
+      fail(entry);
+      return null;
+    }).then(function () { if (!entry.dead) tick(); });
+  }
+
+  function fail(entry) {
+    entry.status = 'error';
+    entry.failedAt = Date.now();
+    entry.error = entry.error || 'no copy of this file could be loaded';
+    S.lastError = 'could not load ' + entry.id;
+  }
+
+  /** Resolves with natural dimensions once the image is decoded. */
+  function decodeImage(url) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      var timer = setTimeout(function () { reject(new Error('timeout')); }, 60000);
+      img.onload = function () {
+        clearTimeout(timer);
+        var dims = { w: img.naturalWidth, h: img.naturalHeight };
+        if (!dims.w || !dims.h) { reject(new Error('empty')); return; }
+        if (typeof img.decode === 'function') img.decode().then(function () { resolve(dims); }, function () { resolve(dims); });
+        else resolve(dims);
+      };
+      img.onerror = function () { clearTimeout(timer); reject(new Error('decode')); };
+      img.src = url;
+    });
+  }
+
+  /**
+   * A still: from the files kept on the device first (keepOffline), and only
+   * then from the network. That order is what lets a screen that reboots with
+   * no network play its whole show.
+   */
+  function loadImage(entry, urls) {
+    return fromKept(urls).then(function (hit) {
+      if (!hit || entry.dead) return loadImageFromNetwork(entry, urls);
+      var objectUrl = URL.createObjectURL(hit.blob);
+      return decodeImage(objectUrl).then(function (dims) {
+        if (entry.dead) { URL.revokeObjectURL(objectUrl); return true; }
+        logCall('GET', shortUrl(hit.url), 'kept', 0, 'image ' + Math.round(hit.blob.size / 1024) + ' KB from storage');
+        Object.assign(entry, { src: objectUrl, objectUrl: objectUrl, from: hit.url, via: 'kept', bytes: hit.blob.size, w: dims.w, h: dims.h });
+        return true;
+      }, function () {
+        // A stored file that will not decode is damaged: forget it, fetch again.
+        URL.revokeObjectURL(objectUrl);
+        forgetKeptFile(hit.url);
+        return loadImageFromNetwork(entry, urls);
+      });
+    });
+  }
+
+  /**
+   * Each candidate in turn (chosen file → the other → fallbacks → poster).
+   * Fetched as a blob into memory where the host allows CORS; where it does not,
+   * loaded directly so the browser holds it — a native app would write to disk.
+   */
+  function loadImageFromNetwork(entry, urls) {
+    var i = 0;
+    function next() {
+      if (entry.dead || i >= urls.length) return Promise.resolve(false);
+      var url = urls[i++];
+      var t0 = performance.now();
+      return fetch(url, { mode: 'cors', credentials: 'omit' }).then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.blob();
+      }).then(function (blob) {
+        var objectUrl = URL.createObjectURL(blob);
+        return decodeImage(objectUrl).then(function (dims) {
+          if (entry.dead) { URL.revokeObjectURL(objectUrl); return true; }
+          logCall('GET', shortUrl(url), 200, performance.now() - t0, 'image ' + Math.round(blob.size / 1024) + ' KB');
+          Object.assign(entry, { src: objectUrl, objectUrl: objectUrl, from: url, via: 'blob', bytes: blob.size, w: dims.w, h: dims.h });
+          return true;
+        }, function (error) { URL.revokeObjectURL(objectUrl); throw error; });
+      }).catch(function () {
+        return decodeImage(url).then(function (dims) {
+          logCall('GET', shortUrl(url), 'img', performance.now() - t0, 'direct (no CORS)');
+          Object.assign(entry, { src: url, objectUrl: null, from: url, via: 'direct', w: dims.w, h: dims.h });
+          return true;
+        }, function () {
+          logCall('GET', shortUrl(url), 'fail', performance.now() - t0, 'image');
+          return next();
+        });
+      });
+    }
+    return next();
+  }
+
+  /** Loads one address into a fresh muted element; resolves with it, or null. */
+  function preloadVideo(entry, src) {
+    return new Promise(function (resolve) {
+      var v = document.createElement('video');
+      v.muted = true;
+      v.playsInline = true;
+      v.setAttribute('playsinline', '');
+      v.setAttribute('muted', '');
+      v.preload = 'auto';
+      var done = false;
+      var finish = function (ok) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        v.onloadedmetadata = v.onloadeddata = v.onerror = null;
+        resolve(ok ? v : null);
+      };
+      var timer = setTimeout(function () { finish(false); }, 45000);
+      v.onloadedmetadata = function () {
+        entry.duration = v.duration;
+        reportDuration(entry.id, v.duration);
+      };
+      v.onloadeddata = function () { finish(true); };
+      v.onerror = function () { finish(false); };
+      v.src = src;
+      v.load();
+    });
+  }
+
+  /** A video is held as a preloaded element, ready to play from its first frame — from storage first. */
+  function loadVideo(entry) {
+    return fromKept(entry.candidates).then(function (hit) {
+      if (!hit || entry.dead) return loadVideoFromNetwork(entry);
+      var objectUrl = URL.createObjectURL(hit.blob);
+      return preloadVideo(entry, objectUrl).then(function (v) {
+        if (!v) { URL.revokeObjectURL(objectUrl); forgetKeptFile(hit.url); return loadVideoFromNetwork(entry); }
+        if (entry.dead) { v.removeAttribute('src'); v.load(); URL.revokeObjectURL(objectUrl); return true; }
+        logCall('GET', shortUrl(hit.url), 'kept', 0, 'video ' + fmtDuration(v.duration * 1000) + ' from storage');
+        Object.assign(entry, {
+          el: v, src: objectUrl, objectUrl: objectUrl, from: hit.url, via: 'kept', bytes: hit.blob.size,
+          w: v.videoWidth || 1920, h: v.videoHeight || 1080, duration: v.duration,
+        });
+        return true;
+      });
+    });
+  }
+
+  /** A kept film's still (the BLUR wash and the poster) comes from storage too, so it shows offline. */
+  function attachKeptStill(entry) {
+    var m = entry.item.media || {};
+    var still = m.display || m.poster;
+    if (!still || entry.via !== 'kept') return Promise.resolve();
+    return fromKept([still]).then(function (hit) {
+      if (!hit || entry.dead) return;
+      entry.stillObjectUrl = URL.createObjectURL(hit.blob);
+    });
+  }
+
+  function loadVideoFromNetwork(entry) {
+    var urls = entry.candidates;
+    var i = 0;
+    function next() {
+      if (entry.dead || i >= urls.length) return Promise.resolve(false);
+      var url = urls[i++];
+      var t0 = performance.now();
+      return preloadVideo(entry, url).then(function (v) {
+        if (!v) {
+          logCall('GET', shortUrl(url), 'fail', performance.now() - t0, 'video');
+          return next();
+        }
+        if (entry.dead) { v.removeAttribute('src'); v.load(); return true; }
+        logCall('GET', shortUrl(url), 200, performance.now() - t0, 'video ' + fmtDuration(v.duration * 1000));
+        Object.assign(entry, { el: v, src: url, from: url, via: 'preload', w: v.videoWidth || 1920, h: v.videoHeight || 1080, duration: v.duration });
+        return true;
+      });
+    }
+    return next();
+  }
+
+  /** Each video's measured length goes to the server once, so it can re-time an estimated slot. */
+  function reportDuration(itemId, seconds) {
+    if (!isFinite(seconds) || seconds <= 0 || S.reportedDurations[itemId]) return;
+    S.reportedDurations[itemId] = true;
+    S.pendingDurations[itemId] = Math.round(seconds * 1000);
+  }
+
+  function shortUrl(url) {
+    try { var u = new URL(url); return u.host + (u.pathname.length > 34 ? '…' + u.pathname.slice(-32) : u.pathname); } catch (e) { return String(url).slice(0, 48); }
+  }
+
+  /* ---- QR codes: fetched with the Bearer header, held as object URLs ----- */
+
+  var qrCache = new Map(); // itemId|target → { state: loading|ready|none|failed, url, at }
+
+  function requestQr(itemId, target) {
+    var key = itemId + '|' + target;
+    var have = qrCache.get(key);
+    if (have && (have.state !== 'failed' || Date.now() - have.at < 30000)) return have;
+    var entry = { state: 'loading', url: null, at: Date.now() };
+    qrCache.set(key, entry);
+    // The sample's codes are public and need no credential (SPEC §11b); a
+    // screen's own codes need its Bearer token (§9).
+    var sample = S.mode === 'sample';
+    var path = (sample ? '/api/v1/device/sample/qr?item=' : '/api/v1/device/qr?item=') + encodeURIComponent(itemId);
+    api('GET', path, undefined, { blob: true, auth: !sample }).then(function (r) {
+      if (r.ok && r.blob) {
+        if (qrCache.get(key) !== entry) return; // cleared meanwhile
+        entry.url = URL.createObjectURL(r.blob);
+        entry.state = 'ready';
+        paintQr();
+      } else if (r.status === 404) {
+        entry.state = 'none'; // the piece has no link: no code, quietly
+      } else if (!sample && r.status === 401 && r.code === 'SCREEN_NOT_LINKED') {
+        unlinkLocally();
+      } else {
+        entry.state = 'failed';
+        entry.at = Date.now();
+      }
+    }, function () { entry.state = 'failed'; entry.at = Date.now(); });
+    return entry;
+  }
+
+  function pruneQr(plan) {
+    var keep = {};
+    plan.forEach(function (p) { keep[p.item.id + '|' + p.settings.qrTarget] = true; });
+    layers.forEach(function (layer) { if (layer.qrKey) keep[layer.qrKey] = true; });
+    qrCache.forEach(function (entry, key) {
+      if (keep[key]) return;
+      if (entry.url) URL.revokeObjectURL(entry.url);
+      qrCache.delete(key);
+    });
+  }
+
+  function clearQrCache() {
+    qrCache.forEach(function (entry) { if (entry.url) URL.revokeObjectURL(entry.url); });
+    qrCache.clear();
+  }
+
+  /* ===========================================================================
+   * 5b. Kept on the device — keepOffline (SPEC §11a)
+   *
+   * The cache above holds a few pieces in memory and lets the rest go. When the
+   * owner switches on "Keep this gallery on the screen", sync answers
+   * device.keepOffline: true and this section downloads *every* piece of the
+   * show into Cache Storage (persistent, survives reloads and reboots), two at a
+   * time, nearest-due first, while the wall plays on regardless. The loaders
+   * above read from it before the network, so a screen that restarts with no
+   * network still plays its whole show from the last snapshot.
+   *
+   *   Cache Storage `solpersona-gallery-media-v1`, keyed by the file's URL —
+   *   the source of truth. `kept.files` (url → bytes) mirrors it in
+   *   localStorage so the counts and the room are known without enumerating.
+   *
+   * A native player does the same with files on disk.
+   *
+   * The one honest limit of a *browser* player: a media host that sends no
+   * CORS headers cannot be read by script, so its file cannot be stored. A
+   * `no-cors` fetch would give an opaque response that Cache Storage accepts,
+   * but a page can only turn an opaque response back into an <img> through a
+   * Service Worker, which this one-file page does not have. So such a piece is
+   * counted as *not stored*, said so in state.error, and keeps streaming. The
+   * `no-cors` request is used only to tell "the host refuses CORS" apart from
+   * "there is no network". A native player has no such limit.
+   * ========================================================================= */
+
+  var KEPT_CACHE = 'solpersona-gallery-media-v1';
+  var kept = {
+    on: false,          // the owner's switch, as last answered by sync (or restored at boot)
+    files: {},          // normalised url → bytes, for everything in Cache Storage
+    items: {},          // itemId → { state, attempts, nextAt, url, note }: queued|loading|stored|waiting|failed|cors|room
+    running: 0,         // downloads in flight
+    reconciled: false,  // files{} has been checked against Cache Storage since it was switched on
+    roomFull: false,
+    error: null,        // what state.error says about keeping, when nothing more urgent is wrong
+    prunedFor: null,    // show id@version whose unused files have been deleted
+    gen: 0,             // bumped on every reset, so a download that lands late is thrown away
+    cleaned: false,     // a leftover store from an earlier run has been deleted once
+    dropping: null,     // the delete in flight, if any
+  };
+
+  function normUrl(url) { try { return new URL(url, location.href).href; } catch (e) { return String(url); } }
+
+  function saveKept() {
+    store.set(KEYS.kept, kept.on && device
+      ? { baseUrl: config.baseUrl, deviceId: device.deviceId, on: true, files: kept.files }
+      : null);
+  }
+
+  /** At start-up: a screen that was keeping its show goes on doing so — before any network. */
+  function restoreKept() {
+    var saved = store.get(KEYS.kept, null);
+    if (!canPersist || !saved || !saved.on || !device || saved.baseUrl !== config.baseUrl || saved.deviceId !== device.deviceId) return;
+    kept.on = true;
+    kept.files = saved.files && typeof saved.files === 'object' ? saved.files : {};
+    reconcileKept();
+  }
+
+  /** Called with every sync answer. */
+  function setKeepOffline(on) {
+    on = !!on && canPersist;
+    if (on) {
+      if (kept.on) return;
+      kept.on = true;
+      kept.items = {};
+      kept.prunedFor = null;
+      reconcileKept();
+      return;
+    }
+    // Off: return to ordinary cache limits and give the room back. Also once
+    // after start-up, in case an earlier run left a store behind.
+    if (kept.on || !kept.cleaned) dropKept();
+    kept.cleaned = true;
+  }
+
+  /** Deletes everything kept. Resolves when Cache Storage has let it go. */
+  function dropKept() {
+    kept.gen += 1;
+    kept.on = false;
+    kept.files = {};
+    kept.items = {};
+    kept.running = 0;
+    kept.reconciled = false;
+    kept.roomFull = false;
+    kept.error = null;
+    kept.prunedFor = null;
+    store.set(KEYS.kept, null);
+    if (!canPersist) return Promise.resolve();
+    // Remembered so a store switched straight back on opens only after this delete.
+    kept.dropping = window.caches.delete(KEPT_CACHE).catch(noop);
+    return kept.dropping;
+  }
+
+  /** clear-cache while keeping: empty the store, then fill it again. */
+  function restartKept() {
+    dropKept().then(function () { if (S.mode === 'player') setKeepOffline(true); });
+  }
+
+  /** Makes files{} agree with what Cache Storage actually holds. */
+  function reconcileKept() {
+    var gen = kept.gen;
+    kept.reconciled = false;
+    (kept.dropping || Promise.resolve()).then(function () {
+      return window.caches.open(KEPT_CACHE);
+    }).then(function (c) { return c.keys(); }).then(function (requests) {
+      if (gen !== kept.gen) return;
+      var files = {};
+      requests.forEach(function (request) {
+        var url = normUrl(request.url);
+        files[url] = typeof kept.files[url] === 'number' ? kept.files[url] : 0;
+      });
+      kept.files = files;
+      kept.reconciled = true;
+      saveKept();
+    }, function () {
+      if (gen !== kept.gen) return;
+      kept.reconciled = true;
+      kept.error = 'This screen refused to keep files (browser storage unavailable).';
+    });
+  }
+
+  /** The first of `urls` that is kept, read back as a blob — or null. */
+  function fromKept(urls) {
+    if (!kept.on || !canPersist) return Promise.resolve(null);
+    var list = urls.filter(Boolean).map(normUrl).filter(function (url) { return kept.files[url] !== undefined; });
+    if (!list.length) return Promise.resolve(null);
+    return window.caches.open(KEPT_CACHE).then(function (c) {
+      var i = 0;
+      function next() {
+        if (i >= list.length) return null;
+        var url = list[i++];
+        return c.match(url, { ignoreVary: true }).then(function (res) {
+          if (!res) { forgetKeptFile(url); return next(); } // the index was ahead of the store
+          return res.blob().then(function (blob) { return { url: url, blob: blob }; });
+        });
+      }
+      return next();
+    }).catch(function () { return null; });
+  }
+
+  function forgetKeptFile(url) {
+    url = normUrl(url);
+    if (kept.files[url] === undefined) return;
+    delete kept.files[url];
+    saveKept();
+    if (canPersist) window.caches.open(KEPT_CACHE).then(function (c) { return c.delete(url); }).catch(noop);
+  }
+
+  /**
+   * Every piece of the show once, nearest-due first (timeline order from the
+   * piece on the wall, wrapping), with the files that would do for it in the
+   * order §6.2 prefers them — the original where imageQuality allows, else the
+   * display copy; for a film, the film, and its still beside it.
+   */
+  function keptPlan() {
+    var show = S.show;
+    if (!show || !show.timeline || !show.timeline.length) return [];
+    var pos = positionAt(show.timeline, show, clock.now());
+    var start = pos ? pos.index : 0;
+    var n = show.timeline.length;
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < n; i += 1) {
+      var item = show.byId[show.timeline[(start + i) % n].id];
+      if (!item || seen[item.id]) continue;
+      seen[item.id] = true;
+      var m = item.media || {};
+      var still = item.kind === 'VIDEO' && (m.display || m.poster) ? normUrl(m.display || m.poster) : null;
+      out.push({ item: item, urls: chooseCandidates(item, show.settings).map(normUrl), still: still });
+    }
+    return out;
+  }
+
+  /**
+   * A piece counts as kept when any of its files is — so a quality change that
+   * now prefers the original still plays the stored display copy offline,
+   * rather than counting the piece as missing.
+   */
+  function keptHas(p) {
+    for (var i = 0; i < p.urls.length; i += 1) if (kept.files[p.urls[i]] !== undefined) return true;
+    return false;
+  }
+
+  function keptCounts() {
+    var plan = keptPlan();
+    var stored = 0;
+    plan.forEach(function (p) { if (keptHas(p)) stored += 1; });
+    return { stored: stored, total: plan.length, plan: plan };
+  }
+
+  function keptBytes() {
+    var total = 0;
+    Object.keys(kept.files).forEach(function (url) { total += kept.files[url] || 0; });
+    return total;
+  }
+
+  function keptBudget() { return capabilities().storageMb * 1048576; }
+
+  /**
+   * Runs from manageCache every tick. `displayLoading` is how many of the two
+   * download slots the pieces due now are using: the piece about to go up is
+   * never queued behind a background download, so keeping only ever takes the
+   * slots they leave free.
+   */
+  function pumpKept(displayLoading) {
+    if (!kept.on || !kept.reconciled || S.mode !== 'player' || !S.show) return;
+    var counts = keptCounts();
+    pruneKept(counts.plan);
+
+    var now = Date.now();
+    var budget = keptBudget();
+    // Worked out afresh each time, so reporting more storage (settings) lifts it.
+    kept.roomFull = keptBytes() >= budget || Object.keys(kept.items).some(function (id) {
+      return kept.items[id].state === 'room' && kept.items[id].nextAt > now;
+    });
+    for (var i = 0; i < counts.plan.length && displayLoading + kept.running < MAX_LOADING; i += 1) {
+      var p = counts.plan[i];
+      if (keptHas(p)) continue;
+      var st = kept.items[p.item.id];
+      if (st && (st.state === 'loading' || st.nextAt > now)) continue;
+      // Out of room: what is stored so far stays; the rest streams. Downloads
+      // run nearest-due first, so on a show that does not fit the stored set is
+      // the run of pieces from where the wall was when keeping began.
+      if (keptBytes() >= budget) { kept.roomFull = true; break; }
+      storeItem(p);
+    }
+
+    var corsBlocked = 0;
+    counts.plan.forEach(function (p) {
+      var st = kept.items[p.item.id];
+      if (st && st.state === 'cors' && !keptHas(p)) corsBlocked += 1;
+    });
+    if (kept.roomFull && counts.stored < counts.total) {
+      kept.error = 'Room for ' + counts.stored + ' of ' + counts.total + ' pieces';
+    } else if (corsBlocked) {
+      kept.error = corsBlocked + ' of ' + counts.total + ' pieces cannot be kept here: their host does not allow it (no CORS), so they stream';
+    } else if (kept.error && kept.error.indexOf('refused') < 0) {
+      kept.error = null;
+    }
+  }
+
+  /**
+   * A new show version: keep every file still in it, delete what is no longer
+   * used. New files are fetched by the pump as usual. An IDLE screen (no show)
+   * keeps what it has until a show arrives — stopping and starting a gallery
+   * should not mean downloading it all again.
+   */
+  function pruneKept(plan) {
+    var sig = S.show.id + '@' + S.show.version;
+    if (kept.prunedFor === sig) return;
+    kept.prunedFor = sig;
+    var wanted = {};
+    var inShow = {};
+    plan.forEach(function (p) {
+      inShow[p.item.id] = true;
+      p.urls.forEach(function (url) { wanted[url] = true; });
+      if (p.still) wanted[p.still] = true;
+    });
+    // Failures are about the old files; a new version may carry new ones.
+    Object.keys(kept.items).forEach(function (id) {
+      if (!inShow[id] || kept.items[id].state !== 'loading') delete kept.items[id];
+    });
+    kept.roomFull = false;
+    var unused = Object.keys(kept.files).filter(function (url) { return !wanted[url]; });
+    if (!unused.length) return;
+    unused.forEach(function (url) { delete kept.files[url]; });
+    saveKept();
+    window.caches.open(KEPT_CACHE).then(function (c) {
+      return Promise.all(unused.map(function (url) { return c.delete(url); }));
+    }).catch(noop);
+  }
+
+  /** Stores one piece: the first of its files that can be kept, then (for a film) its still. */
+  function storeItem(p) {
+    var gen = kept.gen;
+    var id = p.item.id;
+    var st = kept.items[id] || (kept.items[id] = { state: 'queued', attempts: 0, nextAt: 0, url: null, note: null });
+    st.state = 'loading';
+    kept.running += 1;
+    var sawCors = false;
+    var i = 0;
+    function next() {
+      if (gen !== kept.gen) return Promise.resolve('gone');
+      if (i >= p.urls.length) return Promise.resolve(sawCors ? 'cors' : 'failed');
+      var url = p.urls[i++];
+      return keepUrl(url, gen).then(function (outcome) {
+        if (outcome === 'stored' || outcome === 'offline' || outcome === 'room' || outcome === 'gone') return outcome;
+        if (outcome === 'cors') sawCors = true;
+        return next(); // 'failed' or 'cors': the next copy may live on a friendlier host
+      });
+    }
+    next().then(function (outcome) {
+      if (gen !== kept.gen) return;
+      kept.running = Math.max(0, kept.running - 1);
+      var now = Date.now();
+      if (outcome === 'stored') {
+        if (keptBytes() > keptBudget()) {
+          // It did not fit after all (sizes are only known once downloaded).
+          p.urls.forEach(forgetKeptFile);
+          kept.roomFull = true;
+          st.state = 'room';
+          st.nextAt = now + 600000;
+          return;
+        }
+        st.state = 'stored';
+        st.note = null;
+        if (p.still) keepUrl(p.still, gen); // best effort: the wash and poster offline
+        return;
+      }
+      st.attempts += 1;
+      if (outcome === 'room') {
+        kept.roomFull = true;
+        st.state = 'room';
+        st.nextAt = now + 600000;
+      } else if (outcome === 'cors') {
+        st.state = 'cors';
+        st.note = 'host sends no CORS headers';
+        st.nextAt = now + 3600000; // a host does not start allowing it in a minute
+      } else {
+        st.state = outcome === 'offline' ? 'waiting' : 'failed';
+        st.nextAt = now + Math.min(600000, 30000 * Math.pow(2, st.attempts - 1));
+      }
+    });
+  }
+
+  /** Downloads one URL into Cache Storage. → stored | failed | cors | offline | room | gone */
+  function keepUrl(url, gen) {
+    if (kept.files[url] !== undefined) return Promise.resolve('stored');
+    var t0 = performance.now();
+    return fetch(url, { mode: 'cors', credentials: 'omit' }).then(function (res) {
+      if (!res.ok) {
+        logCall('GET', shortUrl(url), res.status, performance.now() - t0, 'keep');
+        return 'failed';
+      }
+      var length = Number(res.headers.get('content-length')) || 0;
+      return window.caches.open(KEPT_CACHE).then(function (c) {
+        return c.put(url, res).then(function () {
+          if (gen !== kept.gen) { c.delete(url); return null; }
+          if (length) return length;
+          return c.match(url, { ignoreVary: true }).then(function (r) { return r ? r.blob() : null; }).then(function (b) { return b ? b.size : 0; });
+        });
+      }).then(function (bytes) {
+        if (bytes === null || gen !== kept.gen) return 'gone';
+        kept.files[url] = bytes;
+        saveKept();
+        logCall('GET', shortUrl(url), 'kept', performance.now() - t0, 'stored ' + Math.round(bytes / 1024) + ' KB');
+        return 'stored';
+      }, function (error) {
+        var full = error && (error.name === 'QuotaExceededError' || /quota/i.test(String(error.message)));
+        logCall('GET', shortUrl(url), 'fail', performance.now() - t0, full ? 'keep: storage full' : 'keep: could not write');
+        return full ? 'room' : 'failed';
+      });
+    }, function () {
+      // The request itself failed: no network, or a host that refuses CORS.
+      // Ask once without CORS to tell which (the answer is opaque and unused).
+      return fetch(url, { mode: 'no-cors', credentials: 'omit' }).then(function () {
+        logCall('GET', shortUrl(url), 'cors', performance.now() - t0, 'keep: host allows no CORS');
+        return 'cors';
+      }, function () {
+        logCall('GET', shortUrl(url), 'ERR', performance.now() - t0, 'keep: network');
+        return 'offline';
+      });
+    });
+  }
+
+  /* ===========================================================================
+   * 6. Renderer
+   *
+   * Two layers, A and B. The front one is on screen; the next piece is built
+   * in the other and brought up by the transition (FADE through black,
+   * DISSOLVE, CUT). A piece is only ever built from a cache entry that has
+   * finished loading.
+   * ========================================================================= */
+
+  var stage = $('stage');
+  var layers = [makeLayer($('layerA')), makeLayer($('layerB'))];
+  var front = 0;
+  var transitioning = null; // { until, done }
+
+  function makeLayer(node) {
+    return {
+      el: node, key: null, entryKey: null, item: null, settings: null, target: null, entry: null,
+      video: null, ownsVideo: false, playEnded: false, estimated: false, clockSig: null,
+      label: null, qrSlot: null, qrKey: null, media: null, holdSince: 0, lastSeek: 0,
+    };
+  }
+
+  function stageUnit() {
+    var w = stage.clientWidth || 1;
+    var h = stage.clientHeight || 1;
+    return { w: w, h: h, u: Math.min(w, h) / 100 };
+  }
+
+  /** Sizes the piece: contained in the margin (and the frame), or covering under FILL. */
+  function layoutLayer(layer) {
+    if (!layer.media || !layer.settings || !layer.entry) return;
+    var s = layer.settings;
+    var media = layer.media;
+    if (s.fit === 'FILL') {
+      media.style.width = '100%';
+      media.style.height = '100%';
+      return;
+    }
+    var g = stageUnit();
+    var margin = g.u * (s.marginPercent || 0);
+    var frame = 0;
+    if (s.fit === 'FRAME') frame = 2 * ((s.frameStyle === 'NONE' ? 0 : g.u * 1.5) + g.u * 4);
+    var availW = Math.max(10, g.w - 2 * margin - frame);
+    var availH = Math.max(10, g.h - 2 * margin - frame);
+    var w = layer.entry.w || 1600;
+    var h = layer.entry.h || 1000;
+    var scale = Math.min(availW / w, availH / h);
+    media.style.width = Math.floor(w * scale) + 'px';
+    media.style.height = Math.floor(h * scale) + 'px';
+    media.style.objectFit = 'contain';
+  }
+
+  function clearLayer(layer) {
+    if (layer.video) {
+      var v = layer.video;
+      v.onended = null;
+      try { v.pause(); v.muted = true; } catch (e) { /* ignore */ }
+      if (layer.ownsVideo) { v.removeAttribute('src'); try { v.load(); } catch (e) { /* ignore */ } }
+      if (v.parentNode) v.parentNode.removeChild(v);
+    }
+    layer.el.textContent = '';
+    layer.el.className = 'layer';
+    layer.el.style.transition = '';
+    layer.el.style.opacity = '0';
+    Object.assign(layer, {
+      key: null, entryKey: null, item: null, settings: null, target: null, entry: null, video: null, ownsVideo: false,
+      playEnded: false, estimated: false, clockSig: null, label: null, qrSlot: null, qrKey: null, media: null,
+    });
+  }
+
+  function clearLayers() {
+    finishTransition();
+    layers.forEach(clearLayer);
+  }
+
+  /** The wall label: a museum card, one quiet line, or nothing. textContent only. */
+  function buildLabel(item, s) {
+    if (s.captionStyle === 'NONE') return null;
+    var title = s.showTitle && item.title ? item.title : null;
+    var artist = s.showArtist && item.artist && item.artist.name ? item.artist.name : null;
+    var year = s.showYear && item.year ? String(item.year) : null;
+    var desc = s.captionStyle === 'LABEL' && s.showDescription && item.description ? item.description : null;
+    if (!title && !artist && !year && !desc) return null;
+    if (s.captionStyle === 'MINIMAL') {
+      var line = el('div', 'label-min');
+      if (title) line.appendChild(el('i', '', title));
+      var rest = [artist, year].filter(Boolean).join(', ');
+      if (rest) {
+        if (title) line.appendChild(el('span', 'sep', '—'));
+        line.appendChild(document.createTextNode(rest));
+      }
+      return line;
+    }
+    var card = el('div', 'label-card');
+    if (title) card.appendChild(el('div', 'label-title', title));
+    if (artist) card.appendChild(el('div', 'label-artist', artist));
+    if (year) card.appendChild(el('div', 'label-year', year));
+    if (desc) card.appendChild(el('div', 'label-desc', desc));
+    return card;
+  }
+
+  function corner(layer, name) {
+    var existing = layer.el.querySelector('.c-' + name);
+    if (existing) return existing;
+    var node = el('div', 'corner c-' + name);
+    layer.el.appendChild(node);
+    return node;
+  }
+
+  /** Builds `target` into `layer` from a ready cache entry. */
+  function buildLayer(layer, target, entry) {
+    clearLayer(layer);
+    var item = target.item;
+    var s = target.settings;
+    layer.el.className = 'layer fit-' + s.fit + (s.fit === 'BLUR' && s.pieceShadow === false ? ' no-shadow' : '');
+
+    // The blurred wash: the piece itself, or a video's still.
+    if (s.fit === 'BLUR') {
+      var washSrc = entry.kind === 'IMAGE' ? entry.src : (entry.stillObjectUrl || item.media.display || item.media.poster);
+      if (washSrc) {
+        var wash = el('img', 'wash');
+        wash.alt = '';
+        // washOpacity: how strongly the wash shows (0–100); black shows through the rest.
+        var strength = typeof s.washOpacity === 'number' ? s.washOpacity : 60;
+        wash.style.opacity = String(Math.max(0, Math.min(100, strength)) / 100);
+        wash.src = washSrc;
+        layer.el.appendChild(wash);
+      }
+    }
+
+    var media;
+    if (entry.kind === 'IMAGE') {
+      media = el('img', 'piece');
+      media.alt = item.title || '';
+      media.src = entry.src;
+    } else {
+      // The cached element if it is free, else a twin (the browser has the bytes).
+      var v = entry.el;
+      var owns = false;
+      if (!v || v.parentNode) {
+        v = document.createElement('video');
+        v.preload = 'auto';
+        v.src = entry.src;
+        owns = true;
+      }
+      v.className = 'piece';
+      v.playsInline = true;
+      v.setAttribute('playsinline', '');
+      v.loop = false; // whole plays are counted against the clock, so looping is done by hand
+      v.muted = !s.videoSound;
+      v.poster = entry.stillObjectUrl || item.media.display || item.media.poster || '';
+      layer.video = v;
+      layer.ownsVideo = owns;
+      media = v;
+    }
+    media.classList.add('piece');
+    layer.media = media;
+
+    var box = el('div', 'piece-box');
+    if (s.fit === 'FRAME') {
+      var moulding = el('div', 'moulding ' + (s.frameStyle || 'GALLERY_WHITE'));
+      var mat = el('div', 'mat');
+      mat.appendChild(media);
+      moulding.appendChild(mat);
+      box.appendChild(moulding);
+    } else {
+      box.appendChild(media);
+    }
+    layer.el.appendChild(box);
+
+    // Corners: a QR above a label when they share one.
+    var qrSlot = null;
+    if (s.qrTarget !== 'NONE') {
+      qrSlot = el('div', 'qr-card');
+      qrSlot.style.display = 'none';
+      var qrCorner = corner(layer, s.qrCorner);
+      qrCorner.appendChild(qrSlot);
+    }
+    var label = buildLabel(item, s);
+    if (label) {
+      label.classList.add('fade');
+      var labelCorner = corner(layer, s.captionCorner);
+      if (s.captionCorner.indexOf('BOTTOM') === 0) labelCorner.appendChild(label);
+      else labelCorner.insertBefore(label, labelCorner.firstChild);
+    }
+
+    Object.assign(layer, {
+      key: target.key, entryKey: entry.key, item: item, settings: s, target: target, entry: entry,
+      label: label, qrSlot: qrSlot, qrKey: s.qrTarget !== 'NONE' ? item.id + '|' + s.qrTarget : null,
+      estimated: !!target.estimated, clockSig: clockSig(), playEnded: false, holdSince: 0, lastSeek: 0,
+    });
+    layoutLayer(layer);
+    paintQr();
+    updateCaption(layer, target);
+
+    if (layer.video) startVideo(layer, target);
+  }
+
+  /** In step: a screen that joins mid-slot starts the film where the others are. */
+  function startVideo(layer, target) {
+    var v = layer.video;
+    var d = v.duration;
+    if (isFinite(d) && d > 0) {
+      var at = (target.offsetMs % (d * 1000)) / 1000;
+      try { v.currentTime = at > d - 0.25 ? 0 : at; } catch (e) { /* not seekable yet */ }
+    }
+    v.onended = function () { onVideoEnded(layer); };
+    if (target.paused) { v.pause(); return; }
+    playVideo(v);
+  }
+
+  function playVideo(v) {
+    var attempt = v.play();
+    if (attempt && attempt.catch) {
+      attempt.catch(function () {
+        // Sound needs a gesture in a browser. Play muted, offer a button.
+        if (!v.muted) {
+          v.muted = true;
+          S.soundBlocked = true;
+          document.body.classList.add('sound-blocked');
+          v.play().catch(noop);
+        }
+      });
+    }
+  }
+
+  function onVideoEnded(layer) {
+    if (layers[front] !== layer || !layer.video) return;
+    var t = S.target;
+    if (t && t.key === layer.key && !t.paused && !S.blackout) {
+      // The slot is not over: another whole play.
+      layer.video.currentTime = 0;
+      playVideo(layer.video);
+    } else {
+      // The slot is over (or we held it for this): now the next piece may come.
+      layer.playEnded = true;
+      tick();
+    }
+  }
+
+  function paintQr() {
+    layers.forEach(function (layer) {
+      if (!layer.qrSlot || !layer.qrKey) return;
+      var entry = qrCache.get(layer.qrKey);
+      if (!entry || entry.state !== 'ready' || layer.qrSlot.firstChild) return;
+      var img = el('img');
+      img.alt = 'Scan to view this piece';
+      img.src = entry.url;
+      layer.qrSlot.appendChild(img);
+      layer.qrSlot.appendChild(el('span', '', 'Scan to view'));
+      layer.qrSlot.style.display = '';
+    });
+  }
+
+  /** captionTiming START: up for the first ~8 s of a piece, then it fades. */
+  function updateCaption(layer, target) {
+    if (!layer.label || !layer.settings) return;
+    var hide = layer.settings.captionTiming === 'START' && target.offsetMs > 8000;
+    layer.label.classList.toggle('gone', hide);
+  }
+
+  function finishTransition() {
+    if (transitioning) { var done = transitioning.done; transitioning = null; done(); }
+  }
+
+  /** Brings `target` up over whatever is on screen. */
+  function showPiece(target, entry) {
+    finishTransition();
+    var cur = layers[front];
+    var nextIndex = 1 - front;
+    var next = layers[nextIndex];
+    buildLayer(next, target, entry);
+    var s = target.settings;
+    var mode = s.transition;
+    var T = mode === 'CUT' ? 0 : Math.max(0, s.transitionMs || 0);
+    if (!cur.key && mode !== 'CUT') mode = 'FADE'; // from nothing: a fade up from black
+    next.el.style.zIndex = '2';
+    cur.el.style.zIndex = '1';
+    front = nextIndex;
+
+    var timers = [];
+    var finish = function () {
+      timers.forEach(clearTimeout);
+      next.el.style.transition = '';
+      next.el.style.opacity = '1';
+      if (cur !== next) clearLayer(cur);
+    };
+    transitioning = { done: finish };
+    var end = function () { if (transitioning && transitioning.done === finish) { transitioning = null; finish(); } };
+
+    if (T === 0) { end(); return; }
+    void next.el.offsetWidth; // commit opacity 0 before animating
+    if (mode === 'DISSOLVE') {
+      next.el.style.transition = 'opacity ' + T + 'ms ease-in-out';
+      next.el.style.opacity = '1';
+      timers.push(setTimeout(end, T + 30));
+    } else if (!cur.key) { // from nothing: one fade up from black
+      next.el.style.transition = 'opacity ' + T + 'ms ease-out';
+      next.el.style.opacity = '1';
+      timers.push(setTimeout(end, T + 30));
+    } else { // FADE through black: down for half, up for half
+      var half = Math.round(T / 2);
+      cur.el.style.transition = 'opacity ' + half + 'ms ease-in';
+      cur.el.style.opacity = '0';
+      timers.push(setTimeout(function () {
+        next.el.style.transition = 'opacity ' + half + 'ms ease-out';
+        next.el.style.opacity = '1';
+      }, half));
+      timers.push(setTimeout(end, T + 30));
+    }
+  }
+
+  /** Takes the screen to nothing (idle, unlicensed). */
+  function fadeOut() {
+    var cur = layers[front];
+    if (!cur.key || transitioning) return;
+    finishTransition();
+    cur.el.style.transition = 'opacity 600ms ease';
+    cur.el.style.opacity = '0';
+    var finish = function () { clearLayer(cur); };
+    transitioning = { done: finish };
+    setTimeout(function () { if (transitioning && transitioning.done === finish) { transitioning = null; finish(); } }, 650);
+  }
+
+  /* ===========================================================================
+   * 7. The tick — what should be on screen now
+   *
+   * Runs every 250 ms (and whenever something arrives). Recomputes the position
+   * from the clock every time: nothing is scheduled, so pause, next, goto and a
+   * new epoch are all simply a different answer on the next tick.
+   * ========================================================================= */
+
+  var PRESENTATION_KEYS = ['fit', 'washOpacity', 'pieceShadow', 'frameStyle', 'marginPercent', 'imageQuality', 'captionStyle', 'captionTiming', 'captionCorner',
+    'showTitle', 'showArtist', 'showYear', 'showDescription', 'qrTarget', 'qrCorner', 'videoSound'];
+
+  function settingsSig(s) {
+    return hash(PRESENTATION_KEYS.map(function (k) { return k + '=' + s[k]; }).join('&'));
+  }
+
+  function clockSig() {
+    return S.show ? S.show.id + '|' + S.show.epochMs + '|' + S.show.pausedAtMs : '';
+  }
+
+  /** The takeover, unless its `until` has passed by our clock. */
+  function activeTakeover(now) {
+    var tk = S.takeover;
+    if (!tk || !tk.item) return null;
+    if (tk.until && Date.parse(tk.until) <= now) return null;
+    return tk;
+  }
+
+  /** Opening hours in the screen's own time zone. on === off: always on. Overnight spans wrap. */
+  function scheduleOpen(schedule, date) {
+    if (!schedule || !schedule.on || !schedule.off) return true;
+    var on = toMinutes(schedule.on);
+    var off = toMinutes(schedule.off);
+    if (on === null || off === null || on === off) return true;
+    var t = date.getHours() * 60 + date.getMinutes();
+    return on < off ? (t >= on && t < off) : (t >= on || t < off);
+  }
+  function toMinutes(hhmmText) {
+    var m = /^(\d{2}):(\d{2})$/.exec(hhmmText);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  }
+
+  function computeTarget(now) {
+    var tk = activeTakeover(now);
+    if (tk && S.status !== 'UNLICENSED') {
+      return {
+        key: 'T|' + tk.item.id + '|' + tk.startedAt + '|' + settingsSig(tk.settings),
+        item: tk.item, settings: tk.settings, takeover: true,
+        offsetMs: Math.max(0, now - Date.parse(tk.startedAt)), paused: false, estimated: false, index: null,
+      };
+    }
+    var show = S.show;
+    if (!show || !show.timeline || !show.timeline.length || S.status === 'UNLICENSED') return null;
+    var pos = positionAt(show.timeline, show, now);
+    if (!pos) return null;
+    var slot = show.timeline[pos.index];
+    var item = show.byId[slot.id];
+    if (!item) return null;
+    return {
+      // Keyed by the piece, not the index: a rebuilt playlist that keeps the
+      // same piece on screen (reanchor) must not transition to itself.
+      key: 'S|' + item.id + '|' + settingsSig(show.settings),
+      item: item, settings: show.settings, takeover: false,
+      offsetMs: pos.offsetMs, slotMs: slot.ms, estimated: !!slot.estimated,
+      paused: show.pausedAtMs !== null && show.pausedAtMs !== undefined, index: pos.index, lap: pos.lap,
+    };
+  }
+
+  /**
+   * Videos never cut off: when an *estimated* slot ends mid-play, the film
+   * finishes before the next piece comes — unless the clock was moved (pause,
+   * next, goto, a new show), which a person asked for and is followed at once.
+   */
+  function shouldHoldVideo(cur, target, now) {
+    if (!cur.video || cur.playEnded || !cur.target || cur.target.takeover || target.takeover) return false;
+    if (!cur.estimated || cur.clockSig !== clockSig()) return false;
+    if (!cur.holdSince) cur.holdSince = now;
+    var d = cur.video.duration;
+    var limit = (isFinite(d) && d > 0 ? d * 1000 : 60000) + 5000; // never hold forever
+    return now - cur.holdSince < limit;
+  }
+
+  /** Keeps a playing film where the clock says it should be (screens in step). */
+  function syncPlayback(layer, target, now) {
+    layer.target = target;
+    layer.estimated = !!target.estimated;
+    layer.holdSince = 0;
+    var v = layer.video;
+    if (!v) return;
+    if (target.paused || S.blackout) {
+      if (!v.paused) v.pause();
+      return;
+    }
+    if (v.paused && !layer.playEnded && v.readyState >= 2) playVideo(v);
+    var d = v.duration;
+    if (!target.estimated && isFinite(d) && d > 1 && now - layer.lastSeek > 8000 && !v.paused) {
+      var expected = (target.offsetMs % (d * 1000)) / 1000;
+      if (expected > 0.6 && expected < d - 0.6 && Math.abs(v.currentTime - expected) > 1) {
+        v.currentTime = expected;
+        layer.lastSeek = now;
+      }
+    }
+  }
+
+  function setScreen(id) {
+    ['screenPairing', 'screenIdle', 'screenUnlicensed'].forEach(function (name) {
+      $(name).classList.toggle('on', name === id);
+    });
+  }
+
+  function tick() {
+    var nowLocal = Date.now();
+    var identifying = S.identifyUntil > nowLocal && S.mode === 'player';
+    if (identifying) $('identifyName').textContent = S.deviceInfo && S.deviceInfo.name ? S.deviceInfo.name : 'This screen';
+    $('identify').classList.toggle('on', identifying);
+    var sample = S.mode === 'sample';
+    $('offline').classList.toggle('on', (S.mode === 'player' || sample) && !S.online);
+    // The sample plays through exactly the same path as a show: same clock, same cache, same renderer.
+    if (S.mode !== 'player' && !sample) return;
+
+    var now = clock.now();
+    var target = computeTarget(now);
+    S.target = target;
+
+    // Opening hours (the show's). A takeover is somebody asking for this piece
+    // now, so it is shown whatever the hour — a choice the contract leaves open.
+    var schedule = S.show && S.show.settings ? S.show.settings.schedule : null;
+    S.blackout = !(target && target.takeover) && !scheduleOpen(schedule, new Date(now));
+    $('blackout').classList.toggle('on', S.blackout);
+    if (S.blackout) $('blackoutClock').textContent = 'closed · ' + hhmmss(new Date(now)) + (schedule ? ' · open ' + schedule.on + '–' + schedule.off : '');
+
+    // The full-screen states. (The sample has none: until it arrives, the breathing dot.)
+    if (sample) { setScreen(null); paintSampleCard(); }
+    else if (S.status === 'UNLICENSED') setScreen('screenUnlicensed');
+    else if (!target && (S.status === 'IDLE' || S.status === 'PLAYING' || S.status === null)) setScreen('screenIdle');
+    else setScreen(null);
+    paintIdle(now);
+
+    manageCache();
+
+    var cur = layers[front];
+    if (!target) {
+      S.holding = null;
+      $('loading').classList.toggle('on', sample);
+      fadeOut();
+      return;
+    }
+    if (cur.key === target.key) {
+      syncPlayback(cur, target, now);
+      updateCaption(cur, target);
+      S.holding = null;
+      $('loading').classList.remove('on');
+      if (cur.video && S.blackout && !cur.video.paused) cur.video.pause();
+      return;
+    }
+    if (transitioning) return;
+    if (cur.key && shouldHoldVideo(cur, target, now)) { S.holding = 'letting the video finish'; return; }
+
+    // Never transition to a piece that has not loaded: hold the current one.
+    var entry = cache.get(entryKey(target.item, target.settings));
+    if (!entry || entry.status !== 'ready') {
+      S.holding = entry && entry.status === 'error' ? 'next piece failed to load' : 'loading the next piece';
+      $('loading').classList.toggle('on', !cur.key);
+      return;
+    }
+    S.holding = null;
+    if (!entry.error && S.lastError && S.lastError.indexOf('could not load') === 0) S.lastError = null;
+    $('loading').classList.remove('on');
+    showPiece(target, entry);
+  }
+
+  function paintIdle(now) {
+    var date = new Date(now);
+    $('idleClock').textContent = hhmm(date);
+    var info = S.deviceInfo;
+    $('idleReady').textContent = S.status === null ? 'Connecting' : 'Ready';
+    $('idleName').textContent = info ? info.name : '';
+    $('idleOwner').textContent = info && info.owner ? '@' + info.owner : '';
+    $('inactiveName').textContent = info ? info.name + (info.owner ? ' · @' + info.owner : '') : '';
+    // "solpersona.com" in production; the address this screen talks to elsewhere.
+    $('inactiveHost').textContent = hostOf(config.baseUrl);
+  }
+
+  function hostOf(url) { try { return new URL(url).host; } catch (e) { return url; } }
+
+  /** burnInGuard: the label, the code and the idle clock move a few pixels every two minutes. */
+  function burnInShift() {
+    var settings = S.target ? S.target.settings : null;
+    var on = !settings || settings.burnInGuard !== false;
+    var g = stageUnit();
+    var range = g.u * 0.6;
+    var dx = on ? Math.round((Math.random() * 2 - 1) * range) : 0;
+    var dy = on ? Math.round((Math.random() * 2 - 1) * range) : 0;
+    stage.style.setProperty('--bx', dx + 'px');
+    stage.style.setProperty('--by', dy + 'px');
+  }
+
+  /* ===========================================================================
+   * 8. Pairing — RFC 8628's shape
+   * ========================================================================= */
+
+  var pairingRun = 0;     // bumped to cancel a stale loop
+  var registration = null;
+
+  function startPairing() {
+    endSample();
+    S.mode = 'pairing';
+    stopSync();
+    clearLayers();
+    clearCache(true);
+    clearQrCache();
+    S.show = null; S.takeover = null; S.status = null; S.target = null;
+    setScreen('screenPairing');
+    $('blackout').classList.remove('on');
+    var run = ++pairingRun;
+    var saved = store.get(KEYS.pairing, null);
+    if (saved && saved.baseUrl === config.baseUrl && Date.parse(saved.expiresAt) - Date.now() > 20000) {
+      registration = saved;
+      paintPairing();
+      pollToken(run);
+    } else {
+      register(run);
+    }
+  }
+
+  function register(run) {
+    registration = null;
+    store.set(KEYS.pairing, null);
+    paintPairing();
+    var attempt = 0;
+    function go() {
+      if (run !== pairingRun) return;
+      var body = { platform: PLATFORM, appVersion: APP_VERSION, capabilities: capabilities() };
+      if (config.name) body.name = config.name;
+      api('POST', '/api/v1/device/register', body, { auth: false }).then(function (r) {
+        if (run !== pairingRun) return;
+        if (r.status === 201 && r.data) {
+          registration = Object.assign({ baseUrl: config.baseUrl }, r.data);
+          store.set(KEYS.pairing, registration);
+          $('pairErr').textContent = '';
+          paintPairing();
+          pollToken(run);
+          return;
+        }
+        attempt += 1;
+        $('pairErr').textContent = r.status === 429
+          ? 'Too many screens asked for a code from here. Trying again shortly.'
+          : (r.message || 'SolPersona did not answer as expected (' + r.status + ').');
+        setTimeout(go, r.status === 429 ? 60000 : Math.min(30000, 2000 * attempt));
+      }, function () {
+        if (run !== pairingRun) return;
+        attempt += 1;
+        $('pairErr').textContent = 'Cannot reach ' + hostOf(config.baseUrl) + '. Retrying…';
+        setTimeout(go, Math.min(30000, 2000 * attempt));
+      });
+    }
+    go();
+  }
+
+  function pollToken(run) {
+    if (run !== pairingRun || !registration) return;
+    var interval = registration.intervalMs > 0 ? registration.intervalMs : 3000;
+    setTimeout(function () {
+      if (run !== pairingRun || !registration) return;
+      if (Date.parse(registration.expiresAt) <= Date.now()) { register(run); return; }
+      api('POST', '/api/v1/device/token', { deviceCode: registration.deviceCode }, { auth: false }).then(function (r) {
+        if (run !== pairingRun) return;
+        if (r.status === 202) { $('pairErr').textContent = ''; pollToken(run); return; }
+        if (r.status === 200 && r.data && r.data.accessToken) {
+          // Given exactly once: store it before anything else.
+          device = {
+            baseUrl: config.baseUrl,
+            deviceId: (r.data.device && r.data.device.id) || registration.deviceId,
+            token: r.data.accessToken,
+            ackSeq: 0,
+          };
+          saveDevice();
+          store.set(KEYS.pairing, null);
+          S.deviceInfo = { id: device.deviceId, name: r.data.device ? r.data.device.name : '', owner: null };
+          startPlayer();
+          return;
+        }
+        if (r.status === 401) { register(run); return; } // TOKEN_EXPIRED, or the code is spent: a new one
+        if (r.status === 429) { setTimeout(function () { pollToken(run); }, 10000); return; }
+        $('pairErr').textContent = r.message || 'Unexpected answer (' + r.status + ').';
+        pollToken(run);
+      }, function () {
+        if (run !== pairingRun) return;
+        $('pairErr').textContent = 'Cannot reach ' + hostOf(config.baseUrl) + '. Retrying…';
+        pollToken(run);
+      });
+    }, interval);
+  }
+
+  function paintPairing() {
+    paintSampleCard();
+    var reg = registration;
+    var img = $('pairQr');
+    if (!reg) {
+      img.hidden = true;
+      $('pairQrPh').style.display = '';
+      $('pairCode').textContent = '';
+      $('pairCode').appendChild(document.createTextNode('····'));
+      $('pairCode').appendChild(el('span', 'dash', '-'));
+      $('pairCode').appendChild(document.createTextNode('····'));
+      $('pairHost').textContent = hostOf(config.baseUrl) + '/pair';
+      $('pairUrl').textContent = '';
+      $('pairExpiry').textContent = '';
+      $('pairDevice').textContent = '';
+      return;
+    }
+    if (img.getAttribute('src') !== reg.qrDataUri) img.src = reg.qrDataUri;
+    img.hidden = false;
+    $('pairQrPh').style.display = 'none';
+    var parts = String(reg.pairingCode || '').split('-');
+    var codeEl = $('pairCode');
+    codeEl.textContent = '';
+    codeEl.appendChild(document.createTextNode(parts[0] || ''));
+    if (parts.length > 1) { codeEl.appendChild(el('span', 'dash', '-')); codeEl.appendChild(document.createTextNode(parts.slice(1).join('-'))); }
+    var pairPage = reg.pairUrl ? reg.pairUrl.replace(/\?.*$/, '') : config.baseUrl + '/pair';
+    $('pairHost').textContent = pairPage.replace(/^https?:\/\//, '');
+    $('pairUrl').textContent = reg.pairUrl || '';
+    $('pairDevice').textContent = 'Screen ' + reg.deviceId;
+    paintPairingCountdown();
+  }
+
+  function paintPairingCountdown() {
+    if ((S.mode !== 'pairing' && S.mode !== 'sample') || !registration) return;
+    var left = Date.parse(registration.expiresAt) - Date.now();
+    $('pairExpiry').textContent = left > 0 ? 'A new code in ' + fmtDuration(left) : 'Getting a new code…';
+  }
+
+  function startPlayer() {
+    pairingRun += 1; // stop any pairing loop
+    endSample();     // linked while the sample played: the person's own gallery takes over
+    S.mode = 'player';
+    S.status = null;
+    setScreen('screenIdle');
+    loadSnapshot();
+    restoreKept();   // before any network: a reboot offline plays from storage
+    tick();
+    scheduleSync(0);
+  }
+
+  /** The credential stopped working (unlinked from the dashboard, or forgotten). */
+  function unlinkLocally() {
+    device = null;
+    saveDevice();
+    dropKept();      // what was kept belongs to the account it was kept for
+    store.set(KEYS.show, null);
+    S.ackSeq = 0;
+    S.deviceInfo = null;
+    S.reportedDurations = {};
+    S.pendingDurations = {};
+    startPairing();
+  }
+
+  function forgetScreen() {
+    var finish = function () { unlinkLocally(); };
+    if (device) api('DELETE', '/api/v1/device').then(finish, finish);
+    else finish();
+  }
+
+  /** A different SolPersona: the credential, the code and anything kept belong to the old one. */
+  function changeBase(base) {
+    config.baseUrl = base;
+    saveConfig();
+    dropKept();
+    device = null;
+    saveDevice();
+    store.set(KEYS.pairing, null);
+    store.set(KEYS.show, null);
+    startPairing();
+  }
+
+  /* ===========================================================================
+   * 8b. Try a sample gallery (SPEC §11b)
+   *
+   * From the pairing screen (the button, T, or OK/Enter on a remote) the screen
+   * plays SolPersona's public sample show — no credential — through exactly the
+   * same clock, cache and renderer as a real show. The pairing loop is *not*
+   * stopped: the code stays on the wall in a small card, /token keeps being
+   * polled, and the moment somebody links the screen startPlayer() takes over
+   * with their own gallery. Esc / Back / "Stop sample" returns to the full
+   * pairing screen. The sample is never written to the playlist snapshot.
+   * ========================================================================= */
+
+  var sampleRun = 0;   // bumped to cancel a stale fetch loop
+  var sampleTimer = null;
+
+  function startSample() {
+    if (S.mode !== 'pairing') return;
+    var run = ++sampleRun;
+    S.mode = 'sample';
+    S.status = 'PLAYING';
+    S.show = null; S.takeover = null; S.target = null;
+    S.online = true; S.failures = 0; S.lastError = null;
+    document.body.classList.add('sample');
+    setScreen(null);
+    paintSampleCard();
+    fetchSample(run);
+    tick();
+  }
+
+  function fetchSample(run) {
+    if (run !== sampleRun || S.mode !== 'sample') return;
+    api('GET', '/api/v1/device/sample', undefined, { auth: false }).then(function (r) {
+      if (run !== sampleRun) return;
+      if (r.ok && r.data && r.data.show) {
+        clock.add(r.data.serverTime, r.sentAt, r.receivedAt);
+        S.online = true;
+        S.failures = 0;
+        S.lastSyncAt = Date.now();
+        // Every answer is the whole show; applyShow swaps it in atomically and
+        // the renderer keeps the piece on the wall when it is still in it.
+        applyShow(r.data.show);
+        var every = r.data.pollMs > 0 ? r.data.pollMs : 60000;
+        S.nextSyncAt = Date.now() + every;
+        sampleTimer = setTimeout(function () { fetchSample(run); }, every);
+        tick();
+        return;
+      }
+      if (!S.show && r.status !== 429 && r.status < 500) {
+        // Nothing to show and the server says it has none: back, with a reason.
+        stopSample();
+        $('pairErr').textContent = 'The sample gallery is not available right now.';
+        return;
+      }
+      retry(r.status === 429 ? 15000 : null);
+    }, function () {
+      if (run !== sampleRun) return;
+      retry(null);
+    });
+    function retry(fixed) {
+      S.online = false;
+      S.failures += 1;
+      var wait = fixed || Math.min(60000, 3000 * Math.pow(2, S.failures - 1));
+      S.nextSyncAt = Date.now() + wait;
+      sampleTimer = setTimeout(function () { fetchSample(run); }, wait);
+    }
+  }
+
+  /** Leaves the sample for the full pairing screen. The pairing loop never stopped. */
+  function stopSample() {
+    if (S.mode !== 'sample') return;
+    endSample();
+    S.mode = 'pairing';
+    setScreen('screenPairing');
+    paintPairing();
+  }
+
+  /** Tears the sample down (for the pairing screen, or for the person's own gallery). */
+  function endSample() {
+    if (S.mode !== 'sample') return;
+    sampleRun += 1;
+    clearTimeout(sampleTimer);
+    sampleTimer = null;
+    document.body.classList.remove('sample');
+    clearLayers();
+    clearCache(true);
+    clearQrCache();
+    S.show = null; S.takeover = null; S.target = null; S.status = null;
+    S.online = true; S.failures = 0; S.nextSyncAt = null;
+    $('loading').classList.remove('on');
+    $('sampleCard').classList.remove('on');
+  }
+
+  /** "Link this screen — solpersona.com/pair · ABCD-EFGH" and the small QR, in a corner the show leaves free. */
+  function paintSampleCard() {
+    var card = $('sampleCard');
+    if (S.mode !== 'sample') { card.classList.remove('on'); return; }
+    var reg = registration;
+    var pairPage = reg && reg.pairUrl ? reg.pairUrl.replace(/\?.*$/, '') : config.baseUrl + '/pair';
+    $('sampleHost').textContent = pairPage.replace(/^https?:\/\//, '');
+    $('sampleCode').textContent = reg ? reg.pairingCode || '' : '';
+    $('sampleCodeSep').style.display = reg ? '' : 'none';
+    var img = $('sampleQr');
+    if (reg && reg.qrDataUri) {
+      if (img.getAttribute('src') !== reg.qrDataUri) img.src = reg.qrDataUri;
+      img.hidden = false;
+    } else {
+      img.hidden = true;
+    }
+    var s = S.show && S.show.settings;
+    var used = s ? [s.captionStyle !== 'NONE' ? s.captionCorner : null, s.qrTarget !== 'NONE' ? s.qrCorner : null] : [];
+    var free = ['TOP_RIGHT', 'TOP_LEFT', 'BOTTOM_RIGHT', 'BOTTOM_LEFT'].filter(function (c) { return used.indexOf(c) < 0; });
+    var wanted = 'on c-' + (free[0] || 'TOP_RIGHT');
+    if (card.className !== wanted) card.className = wanted;
+  }
+
+  /* ===========================================================================
+   * 9. Chrome, settings, keyboard, debug, boot
+   * ========================================================================= */
+
+  function applyStageSize() {
+    var viewport = $('viewport');
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var r = RESOLUTIONS[config.resolution];
+    var sw = vw;
+    var sh = vh;
+    if (r && r.w) {
+      var scale = Math.min(vw / r.w, vh / r.h);
+      sw = Math.floor(r.w * scale);
+      sh = Math.floor(r.h * scale);
+    }
+    viewport.classList.toggle('letterboxed', !!(r && r.w));
+    stage.style.width = sw + 'px';
+    stage.style.height = sh + 'px';
+    stage.style.setProperty('--u', (Math.min(sw, sh) / 100).toFixed(3) + 'px');
+    stage.classList.toggle('portrait', sh > sw);
+    layers.forEach(layoutLayer);
+  }
+
+  // Cursor and chrome withdraw after three seconds of stillness.
+  var idleTimer = null;
+  function wake() {
+    document.body.classList.remove('idle-cursor');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(function () {
+      if (!$('settings').classList.contains('on')) document.body.classList.add('idle-cursor');
+    }, 3000);
+  }
+
+  function toggleFullscreen() {
+    var doc = document;
+    if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+      (doc.exitFullscreen || doc.webkitExitFullscreen).call(doc);
+    } else {
+      var root = doc.documentElement;
+      var request = root.requestFullscreen || root.webkitRequestFullscreen;
+      if (request) { var p = request.call(root); if (p && p.catch) p.catch(noop); }
+    }
+  }
+
+  function toggleDebug(force) {
+    config.debug = typeof force === 'boolean' ? force : !config.debug;
+    document.body.classList.toggle('debug', config.debug);
+    saveConfig();
+    renderDebug();
+  }
+
+  function openSettings(open) {
+    var panel = $('settings');
+    var on = typeof open === 'boolean' ? open : !panel.classList.contains('on');
+    panel.classList.toggle('on', on);
+    if (on) {
+      $('setBase').value = config.baseUrl;
+      $('setRes').value = config.resolution;
+      $('setName').value = config.name || '';
+      $('setStorage').value = typeof config.storageMb === 'number' ? config.storageMb : '';
+      $('setStorage').placeholder = 'estimated: ' + estimatedStorageMb + ' MB';
+      $('setOriginals').checked = !!config.originals;
+      $('setPersist').textContent = canPersist
+        ? 'Reports persistentStorage: yes — can keep a whole gallery in Cache Storage when the owner asks.'
+        : 'Reports persistentStorage: no — Cache Storage needs https or localhost, so this page streams.';
+      $('setPlatform').textContent = PLATFORM;
+      $('setApp').textContent = APP_VERSION;
+      paintCast();
+      $('setDevice').textContent = device ? device.deviceId : (registration ? registration.deviceId + ' (pairing)' : 'not linked');
+      wake();
+    }
+  }
+
+  function saveSettings() {
+    var base = normaliseBase($('setBase').value) || defaultBase();
+    var storageText = $('setStorage').value.trim();
+    var baseChanged = base !== config.baseUrl;
+    config.baseUrl = base;
+    config.resolution = $('setRes').value;
+    config.name = $('setName').value.trim().slice(0, 60);
+    config.storageMb = storageText === '' ? null : Math.max(0, Math.round(Number(storageText)) || 0);
+    config.originals = $('setOriginals').checked;
+    saveConfig();
+    applyStageSize();
+    openSettings(false);
+    if (baseChanged) {
+      // A credential belongs to the SolPersona that issued it.
+      changeBase(base);
+    } else if (S.mode === 'player') {
+      syncNow(); // report the new capabilities
+    }
+  }
+
+  function manualReload() {
+    if (S.mode === 'player') { dropPlaylist(); syncNow(); }
+    else if (S.mode === 'sample') { clearTimeout(sampleTimer); fetchSample(sampleRun); }
+    else startPairing();
+  }
+
+  function renderDebug() {
+    if (!config.debug) return;
+    var now = clock.now();
+    var show = S.show;
+    var t = S.target;
+    var cur = layers[front];
+    var kv = function (rows) {
+      return '<div class="kv">' + rows.map(function (r) { return '<span>' + esc(r[0]) + '</span><span title="' + esc(r[1]) + '">' + (r[2] ? r[1] : esc(r[1])) + '</span>'; }).join('') + '</div>';
+    };
+    var html = '';
+    html += '<h3>Connection</h3>' + kv([
+      ['mode', S.mode + (S.mode === 'sample' ? ' (public sample, no credential)' : '')],
+      ['status', S.status || '—'],
+      ['online', S.online ? '<span class="ok">yes</span>' : '<span class="bad">no (' + esc(S.failures) + ' failures)</span>', true],
+      ['base', config.baseUrl],
+      ['device', device ? device.deviceId : '—'],
+      ['name / owner', S.deviceInfo ? S.deviceInfo.name + ' / @' + (S.deviceInfo.owner || '—') : '—'],
+      ['clock offset', clock.synced ? Math.round(clock.offset) + ' ms (rtt ' + clock.rtt + ' ms)' : 'not synced'],
+      ['server now', hhmmss(new Date(now))],
+      ['last sync', S.lastSyncAt ? Math.round((Date.now() - S.lastSyncAt) / 100) / 10 + ' s ago' : '—'],
+      ['next sync', S.nextSyncAt ? Math.max(0, Math.round((S.nextSyncAt - Date.now()) / 100) / 10) + ' s' : '—'],
+      ['screen', simSize().w + '×' + simSize().h + (config.originals ? ' · originals' : '')],
+      ['error', S.lastError || '—'],
+    ]);
+    if (show) {
+      var total = timelineLength(show.timeline);
+      html += '<h3>Show</h3>' + kv([
+        ['id', show.id],
+        ['version', show.version],
+        ['source', show.sourceRef],
+        ['epoch', new Date(show.epochMs).toISOString()],
+        ['paused', show.pausedAtMs !== null && show.pausedAtMs !== undefined ? 'at ' + new Date(show.pausedAtMs).toISOString() : 'no'],
+        ['pieces', show.items.length + ' · lap ' + fmtDuration(total)],
+        ['fit / transition', show.settings.fit + ' / ' + show.settings.transition + ' ' + show.settings.transitionMs + 'ms'],
+        ['schedule', show.settings.schedule ? show.settings.schedule.on + '–' + show.settings.schedule.off + (S.blackout ? ' (closed)' : '') : 'always'],
+      ]);
+    }
+    if (t) {
+      var pct = t.slotMs ? Math.min(100, (t.offsetMs / t.slotMs) * 100) : 0;
+      html += '<h3>' + (t.takeover ? 'Takeover' : 'Position') + '</h3>' + kv([
+        ['index', t.index === null ? '—' : t.index + (t.lap !== undefined ? ' (lap ' + t.lap + ')' : '')],
+        ['item', t.item.id],
+        ['title', t.item.title || '—'],
+        ['kind', t.item.kind + (t.estimated ? ' · estimated slot' : '')],
+        ['offset / slot', fmtDuration(t.offsetMs) + ' / ' + (t.slotMs ? fmtDuration(t.slotMs) : '∞')],
+        ['on screen', cur.item ? cur.item.id + (cur.key === t.key ? '' : ' (held)') : '—'],
+        ['holding', S.holding ? '<span class="warn">' + esc(S.holding) + '</span>' : '—', true],
+        ['video', cur.video ? (cur.video.paused ? 'paused ' : 'playing ') + cur.video.currentTime.toFixed(1) + ' / ' + (isFinite(cur.video.duration) ? cur.video.duration.toFixed(1) : '?') + ' s' + (cur.video.muted ? ' · muted' : ' · sound') : '—'],
+      ]);
+      if (t.slotMs) html += '<div class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></div>';
+    }
+    if (S.takeover) html += '<h3>Takeover (raw)</h3>' + kv([['item', S.takeover.item ? S.takeover.item.id : '—'], ['until', S.takeover.until || 'dismissed'], ['started', S.takeover.startedAt]]);
+
+    html += '<h3>Cache (' + cache.size + ', ' + countReady() + ' ready, ' + bufferedAhead() + ' ahead)</h3>';
+    var rows = [];
+    cache.forEach(function (e) {
+      var cls = e.status === 'ready' ? 'ok' : e.status === 'error' ? 'bad' : 'warn';
+      var detail = e.status === 'ready' ? e.via + (e.bytes ? ' ' + Math.round(e.bytes / 1024) + 'KB' : '') + ' ' + e.w + '×' + e.h + (e.stillFallback ? ' still' : '') : e.status;
+      rows.push([e.id, '<span class="' + cls + '">' + esc(detail) + '</span>', true]);
+    });
+    html += rows.length ? kv(rows) : '<div>—</div>';
+    var qrRows = [];
+    qrCache.forEach(function (q, key) { qrRows.push([key.split('|')[0], q.state]); });
+    if (qrRows.length) html += '<h3>QR codes</h3>' + kv(qrRows);
+
+    // Kept on the device (§11a).
+    if (S.mode === 'player') {
+      if (!kept.on) {
+        html += '<h3>Kept on the device</h3>' + kv([
+          ['keepOffline', 'off'],
+          ['persistent', canPersist ? 'available (Cache Storage)' : 'not available here'],
+        ]);
+      } else {
+        var kc = keptCounts();
+        var kpct = kc.total ? (kc.stored / kc.total) * 100 : 0;
+        var states = {};
+        Object.keys(kept.items).forEach(function (id) { var st = kept.items[id].state; states[st] = (states[st] || 0) + 1; });
+        html += '<h3>Kept on the device · ' + kc.stored + ' of ' + kc.total + '</h3>';
+        html += '<div class="bar"><i style="width:' + kpct.toFixed(1) + '%"></i></div>' + kv([
+          ['keepOffline', '<span class="ok">on</span>' + (kept.reconciled ? '' : ' · reading storage…'), true],
+          ['size', (keptBytes() / 1048576).toFixed(1) + ' MB of ' + capabilities().storageMb + ' MB' + (kept.roomFull ? ' · full' : '')],
+          ['files', Object.keys(kept.files).length + ' in ' + KEPT_CACHE],
+          ['downloading', String(kept.running)],
+          ['states', Object.keys(states).map(function (k) { return k + ' ' + states[k]; }).join(' · ') || '—'],
+          ['error', kept.error ? '<span class="warn">' + esc(kept.error) + '</span>' : '—', true],
+        ]);
+        var keptRows = [];
+        kc.plan.forEach(function (p) {
+          var st = kept.items[p.item.id];
+          var has = keptHas(p);
+          if (has && !(st && st.state === 'loading')) return; // list only what is not done yet
+          var label = st ? st.state + (st.note ? ' · ' + st.note : '') + (st.nextAt > Date.now() ? ' · again in ' + fmtDuration(st.nextAt - Date.now()) : '') : 'queued';
+          var cls = st && (st.state === 'cors' || st.state === 'failed' || st.state === 'room') ? 'bad' : 'warn';
+          keptRows.push([p.item.id, '<span class="' + cls + '">' + esc(label) + '</span>', true]);
+        });
+        if (keptRows.length) html += kv(keptRows.slice(0, 30));
+      }
+    }
+
+    html += '<h3>Commands · ackSeq ' + esc(S.ackSeq) + '</h3>';
+    html += S.handledCommands.length ? kv(S.handledCommands.map(function (c) { return ['#' + c.seq, c.type + ' at ' + hhmmss(c.at)]; })) : '<div>—</div>';
+    var pending = Object.keys(S.pendingDurations);
+    if (pending.length) html += '<h3>Durations to report</h3>' + kv(pending.map(function (id) { return [id, fmtDuration(S.pendingDurations[id])]; }));
+
+    html += '<h3>API</h3><div class="log">' + callLog.slice(0, 40).map(function (c) {
+      var cls = c.status === 'ERR' || c.status === 'fail' || c.status >= 400 ? 'bad' : 'ok';
+      return '<div>' + esc(hhmmss(c.at)) + ' <span class="' + cls + '">' + esc(c.status) + '</span> ' + esc(c.method) + ' ' + esc(c.path) + ' ' + esc(c.ms) + 'ms ' + esc(c.note) + '</div>';
+    }).join('') + '</div>';
+    $('debug').innerHTML = html;
+  }
+
+  function boot() {
+    Object.keys(RESOLUTIONS).forEach(function (key) {
+      var option = el('option', '', RESOLUTIONS[key].label);
+      option.value = key;
+      $('setRes').appendChild(option);
+    });
+    document.body.classList.toggle('debug', !!config.debug);
+    applyStageSize();
+    window.addEventListener('resize', applyStageSize);
+    document.addEventListener('fullscreenchange', applyStageSize);
+
+    ['mousemove', 'mousedown', 'touchstart', 'keydown'].forEach(function (type) { document.addEventListener(type, wake, { passive: true }); });
+    document.addEventListener('click', function () {
+      // A gesture: sound may play now, if the gallery wants it.
+      if (!S.soundBlocked) return;
+      S.soundBlocked = false;
+      document.body.classList.remove('sound-blocked');
+      var cur = layers[front];
+      if (cur.video && cur.settings && cur.settings.videoSound) { cur.video.muted = false; playVideo(cur.video); }
+    });
+    $('btnSample').addEventListener('click', function () { startSample(); });
+    $('btnStopSample').addEventListener('click', function () { stopSample(); });
+    $('btnCast').addEventListener('click', function () { castStart(); });
+    $('btnCastSample').addEventListener('click', function () { sendToTv({ action: 'sample' }); });
+    $('btnCastStop').addEventListener('click', function () { castStop(); });
+    $('btnFull').addEventListener('click', toggleFullscreen);
+    $('btnSettings').addEventListener('click', function () { openSettings(); });
+    $('btnDebug').addEventListener('click', function () { toggleDebug(); });
+    $('btnSave').addEventListener('click', saveSettings);
+    $('btnReload').addEventListener('click', function () { openSettings(false); manualReload(); });
+    $('btnForget').addEventListener('click', function () {
+      if (window.confirm('Forget this screen? It unlinks from its account and shows a new pairing code.')) { openSettings(false); forgetScreen(); }
+    });
+    document.addEventListener('keydown', function (event) {
+      var tag = event.target && event.target.tagName;
+      var settingsOpen = $('settings').classList.contains('on');
+      if (event.key === 'Escape') {
+        if (settingsOpen) openSettings(false);
+        else stopSample();
+        return;
+      }
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || event.metaKey || event.ctrlKey || event.altKey) return;
+      // A remote's Back arrives under several names, depending on the platform.
+      if (event.key === 'Backspace' || event.key === 'BrowserBack' || event.key === 'GoBack') {
+        if (S.mode === 'sample') { event.preventDefault(); stopSample(); }
+        return;
+      }
+      // A remote's OK on the pairing screen: the sample (unless a control has focus and will take it itself).
+      if (event.key === 'Enter') {
+        if (S.mode === 'pairing' && tag !== 'BUTTON' && !settingsOpen) startSample();
+        return;
+      }
+      var key = event.key.toLowerCase();
+      if (key === 'd') toggleDebug();
+      else if (key === 'f') toggleFullscreen();
+      else if (key === 'r') manualReload();
+      else if (key === 's') openSettings();
+      else if (key === 't') startSample();
+    });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { tick(); if (S.mode === 'player') syncNow(); } });
+
+    if (navigator.storage && navigator.storage.estimate) {
+      navigator.storage.estimate().then(function (estimate) {
+        if (estimate && estimate.quota) estimatedStorageMb = Math.min(10000000, Math.round(estimate.quota / 1048576));
+      }, noop);
+    }
+
+    setInterval(tick, 250);
+    setInterval(logOfflinePlay, 1000);
+    setInterval(function () { paintPairingCountdown(); renderDebug(); }, 500);
+    setInterval(burnInShift, 120000);
+    wake();
+
+    if (RECEIVER) startReceiver();
+    else initCastSender();
+
+    if (device) startPlayer(); else startPairing();
+  }
+
+  /* ===========================================================================
+   * 10. Show on a TV — Google Cast
+   *
+   * Sender (this page in Chrome or Edge): the Web Sender SDK, loaded only when
+   * this SolPersona has a receiver App ID (CAST_RECEIVER_APP_ID, injected by the
+   * /device-simulator route as window.SOLPERSONA_CAST_APP_ID). Casting launches
+   * the receiver on the Chromecast and tells it which SolPersona to use.
+   *
+   * Receiver (this page at /cast-receiver, on the Chromecast): an ordinary
+   * screen. It registers *itself*, shows its own pairing QR on the TV — the
+   * Chromecast becomes a screen of its own on the account, not a mirror of
+   * this window — offers the sample, and plays. Its credential is kept in
+   * localStorage like the simulator's: a Chromecast keeps localStorage for the
+   * receiver's origin, and if it ever loses it the TV simply shows a new
+   * pairing code and is linked again.
+   *
+   * AirPlay is deliberately absent: Safari can only AirPlay a <video>, and a
+   * gallery is not one. The panel explains screen mirroring instead.
+   * ========================================================================= */
+
+  var CAST_NS = 'urn:x-cast:com.solpersona.gallery';
+  var CAST_APP_ID = typeof window.SOLPERSONA_CAST_APP_ID === 'string' && window.SOLPERSONA_CAST_APP_ID ? window.SOLPERSONA_CAST_APP_ID : null;
+  var castSender = { loaded: false, failed: false, note: null };
+
+  function castContext() {
+    var c = window.cast;
+    return castSender.loaded && c && c.framework ? c.framework.CastContext.getInstance() : null;
+  }
+
+  /** Why casting is not offered here, or null when it can be. */
+  function castUnavailableReason() {
+    if (!CAST_APP_ID) return 'Casting is not set up on this SolPersona (no CAST_RECEIVER_APP_ID).';
+    var ua = navigator.userAgent;
+    var chromium = !!window.chrome && /(Chrome|Chromium|Edg)\//.test(ua) && !/(CriOS|EdgiOS|OPR\/|SamsungBrowser)/.test(ua);
+    if (!chromium) return 'Google Cast works from Chrome or Edge on a computer or an Android phone.';
+    if (!window.isSecureContext) return 'Google Cast needs this page on https (or localhost).';
+    if (castSender.failed) return 'The Google Cast library did not load.';
+    return null;
+  }
+
+  function initCastSender() {
+    if (castUnavailableReason()) { paintCast(); return; }
+    // The SDK calls this global when it is ready; it must exist before the script loads.
+    window.__onGCastApiAvailable = function (available) {
+      var c = window.cast;
+      if (!available || !c || !c.framework || !window.chrome || !window.chrome.cast) { castSender.failed = true; paintCast(); return; }
+      var context = c.framework.CastContext.getInstance();
+      context.setOptions({
+        receiverApplicationId: CAST_APP_ID,
+        autoJoinPolicy: window.chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+      });
+      context.addEventListener(c.framework.CastContextEventType.CAST_STATE_CHANGED, paintCast);
+      context.addEventListener(c.framework.CastContextEventType.SESSION_STATE_CHANGED, function (event) {
+        var states = c.framework.SessionState;
+        if (event.sessionState === states.SESSION_STARTED || event.sessionState === states.SESSION_RESUMED) {
+          // Which SolPersona the TV should ask. It pairs on its own; nothing is handed over.
+          sendToTv({ base: config.baseUrl });
+        }
+        paintCast();
+      });
+      castSender.loaded = true;
+      paintCast();
+    };
+    var script = document.createElement('script');
+    script.src = 'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1';
+    script.async = true;
+    script.onerror = function () { castSender.failed = true; paintCast(); };
+    document.head.appendChild(script);
+    paintCast();
+  }
+
+  function castStart() {
+    var context = castContext();
+    if (!context) return;
+    castSender.note = null;
+    context.requestSession().then(noop, function (code) {
+      // 'cancel' is the person closing the chooser: nothing to say.
+      castSender.note = code && code !== 'cancel' ? 'Could not start casting (' + code + ').' : null;
+      paintCast();
+    });
+  }
+
+  function castStop() {
+    var context = castContext();
+    if (context) context.endCurrentSession(true); // true: close the app on the TV too
+  }
+
+  function sendToTv(message) {
+    var context = castContext();
+    var session = context && context.getCurrentSession();
+    if (!session) return;
+    var sent = session.sendMessage(CAST_NS, message);
+    if (sent && sent.catch) sent.catch(function (code) { castSender.note = 'The TV did not take the message (' + code + ').'; paintCast(); });
+  }
+
+  /** The "Show on a TV" panel. */
+  function paintCast() {
+    if (RECEIVER) return;
+    var reason = castUnavailableReason();
+    var context = castContext();
+    var state = context ? context.getCastState() : null;
+    var states = window.cast && window.cast.framework ? window.cast.framework.CastState : {};
+    var connected = !!state && state === states.CONNECTED;
+    var note;
+    if (reason) note = reason;
+    else if (!context) note = 'Loading Google Cast…';
+    else if (state === states.NO_DEVICES_AVAILABLE) note = 'No Chromecast or Google TV found on this network.';
+    else if (state === states.CONNECTING) note = 'Connecting…';
+    else if (connected) {
+      var session = context.getCurrentSession();
+      var tv = session && session.getCastDevice ? session.getCastDevice().friendlyName : 'the TV';
+      note = 'Showing on ' + tv + '. The TV is a screen of its own: link it with the code it shows, or play the sample.';
+    } else note = 'Opens SolPersona Gallery on a Chromecast or Google TV as its own screen.';
+    if (castSender.note) note += ' ' + castSender.note;
+    $('castNote').textContent = note;
+    $('btnCast').hidden = !!reason || !context || connected || state === states.NO_DEVICES_AVAILABLE;
+    $('btnCastSample').hidden = !connected;
+    $('btnCastStop').hidden = !connected;
+  }
+
+  /** On the Chromecast. Outside one (the page opened in a browser) it is simply a screen. */
+  function startReceiver() {
+    document.body.classList.add('receiver');
+    var framework = window.cast && window.cast.framework;
+    if (!framework || !framework.CastReceiverContext) return;
+    var context = framework.CastReceiverContext.getInstance();
+    context.addCustomMessageListener(CAST_NS, function (event) { onTvMessage(event.data); });
+    // A wall is not idle because nothing is "playing" in the Cast sense.
+    context.start({ disableIdleTimeout: true });
+  }
+
+  /**
+   * Messages from the sender: { base } and { action: 'sample' | 'stop-sample' }.
+   * A sender can only choose which SolPersona an *unlinked* TV asks for a code —
+   * a linked TV belongs to its account and keeps its base (forget it from the
+   * dashboard first) — and pairing still needs a person to scan the code, so
+   * nothing is granted by a message.
+   */
+  function onTvMessage(data) {
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return; } }
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.base === 'string') {
+      var base = normaliseBase(data.base);
+      if (/^https?:\/\/[^/\s]+$/.test(base) && base !== config.baseUrl && !device) changeBase(base);
+    }
+    if (data.action === 'sample') startSample();
+    else if (data.action === 'stop-sample') stopSample();
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
