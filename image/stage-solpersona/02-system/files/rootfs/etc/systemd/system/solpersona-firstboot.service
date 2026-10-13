@@ -5,9 +5,11 @@ ConditionPathExists=!/etc/solpersona-gallery/firstboot-done
 # Raspberry Pi Imager's settings are applied by its own script in a boot of
 # their own, which deletes the script when done: wait for that boot to finish.
 ConditionPathExists=!/boot/firmware/firstrun.sh
-DefaultDependencies=no
-After=local-fs.target systemd-remount-fs.service regenerate_ssh_host_keys.service
-Before=NetworkManager.service solpersona-agent.service solpersona-kiosk.service sysinit.target
+# Ordinary dependencies (after sysinit), before everything that uses the data
+# partition. Ordering this before sysinit.target made a cycle with units that
+# run after it, and systemd dropped this job.
+After=local-fs.target systemd-remount-fs.service boot-firmware.mount
+Before=NetworkManager.service solpersona-agent.service solpersona-kiosk.service systemd-user-sessions.service
 
 [Service]
 Type=oneshot
@@ -16,4 +18,4 @@ StandardOutput=journal+console
 TimeoutStartSec=15min
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=multi-user.target

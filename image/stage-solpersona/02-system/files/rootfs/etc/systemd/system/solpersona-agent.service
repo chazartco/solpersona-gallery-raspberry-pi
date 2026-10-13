@@ -1,7 +1,9 @@
 [Unit]
 Description=SolPersona Gallery agent (pairing, sync, the gallery on the card, screen power)
 After=local-fs.target network.target solpersona-boot-config.service solpersona-firstboot.service
-RequiresMountsFor=/var/lib/solpersona-gallery /var/cache/solpersona-gallery
+# After the data partition, but never dependent on it: without it the screen
+# still pairs and plays (its state then lasts until the next reboot).
+After=var-lib-solpersona\x2dgallery.mount var-cache-solpersona\x2dgallery.mount
 
 [Service]
 Type=notify

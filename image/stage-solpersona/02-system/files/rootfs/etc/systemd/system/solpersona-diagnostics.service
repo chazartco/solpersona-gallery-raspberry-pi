@@ -1,0 +1,8 @@
+[Unit]
+Description=SolPersona Gallery: write diagnostics to the boot partition
+After=boot-firmware.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/solpersona-gallery/diagnostics.sh
+Nice=10

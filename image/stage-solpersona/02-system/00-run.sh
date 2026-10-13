@@ -52,5 +52,6 @@ systemctl set-default graphical.target
 systemctl disable getty@tty1.service
 systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer
 systemctl enable solpersona-firstboot.service solpersona-boot-config.service solpersona-agent.service \
-	solpersona-kiosk.service solpersona-updater.timer solpersona-os-boot.service
+	solpersona-kiosk.service solpersona-updater.timer solpersona-os-boot.service \
+	solpersona-diagnostics.timer
 EOF

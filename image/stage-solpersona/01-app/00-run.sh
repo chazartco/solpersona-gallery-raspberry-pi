@@ -13,9 +13,13 @@ chmod -R u=rwX,go=rX "${APP}"
 
 on_chroot << 'EOF'
 # The user everything on the wall runs as. Never logs in; owns only its own state.
+# Its home is on the root, not the data partition: logind makes a login
+# session depend on the home directory's mount, and the wall must come up
+# even if the data partition does not.
 if ! id gallery >/dev/null 2>&1; then
-	adduser --system --group --home /var/lib/solpersona-gallery --no-create-home --shell /usr/sbin/nologin gallery
+	adduser --system --group --home /var/lib/solpersona-kiosk --shell /usr/sbin/nologin gallery
 fi
+install -d -o gallery -g gallery -m 750 /var/lib/solpersona-kiosk
 for GRP in video render input audio; do
 	adduser gallery "$GRP"
 done
