@@ -114,6 +114,33 @@ def test_downloads_every_piece_nearest_due_first(tmp_path):
     asyncio.run(main())
 
 
+def test_the_small_copy_comes_first_and_the_original_still_follows(tmp_path):
+    async def main():
+        host = Host({"original.jpg": 50 * KB, "display.webp": 2 * KB})
+        server, session, store, base, _ = await make_store(tmp_path, host, [10 ** 9])
+        try:
+            o, d = f"{base}/original.jpg", f"{base}/display.webp"
+            want = Want("i", [o, d], 0, still=d)
+            store.update([want], False, [], "s@1")
+            await settle(store)
+            assert host.hits == ["display.webp", "original.jpg"]
+            assert store.has(o) and store.has(d) and store.complete(want)
+        finally:
+            await session.close()
+            await server.close()
+
+    asyncio.run(main())
+
+
+def test_a_small_copy_alone_does_not_end_the_download(tmp_path):
+    store = MediaStore(tmp_path, session=lambda: None, cap_bytes=lambda: 10 ** 9)
+    store.load()
+    store.files["d"] = f("d", 10, 0)
+    assert not store.complete(Want("i", ["o", "d"], 0, still="d"))
+    store.files["o"] = f("o", 10, 0)
+    assert store.complete(Want("i", ["o", "d"], 0, still="d"))
+
+
 def test_failed_copy_falls_back_to_the_next(tmp_path):
     async def main():
         host = Host({"display.webp": 5 * KB})

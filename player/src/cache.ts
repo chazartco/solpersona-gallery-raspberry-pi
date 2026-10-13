@@ -1,6 +1,6 @@
 import type { AgentLink } from './agent';
 import type { ScreenItem, Settings } from './protocol';
-import { chooseCandidates, hash } from './rules';
+import { chooseCandidates, hash, loadOrder, shouldUpgrade } from './rules';
 
 /**
  * Pieces ready to go on the wall — section 5 of the reference simulator.
@@ -50,6 +50,7 @@ export class MemoryCache {
   readonly entries = new Map<string, Entry>();
   /** URLs the agent has on the card: tried first, so a reboot with no network plays. */
   stored = new Set<string>();
+  private upgraded = new Set<string>();
   lastError: string | null = null;
   onSettled: () => void = () => {};
   onDuration: (itemId: string, seconds: number) => void = () => {};
@@ -109,6 +110,17 @@ export class MemoryCache {
 
   /** Keep what the plan and the wall need, evict the rest, start loads in plan order. */
   manage(plan: Planned[], onWall: Set<string>): void {
+    // A piece held from a small copy whose full file is now on the card is
+    // loaded again from the card (the one on the wall, when it next comes up).
+    // Once per piece: a stored original that will not decode must not loop.
+    this.entries.forEach((entry, key) => {
+      if (entry.status === 'ready' && entry.kind === 'IMAGE' && !entry.stillFallback && !onWall.has(key)
+        && !this.upgraded.has(key) && shouldUpgrade(entry.from, entry.candidates, this.stored)) {
+        this.upgraded.add(key);
+        this.evict(entry);
+      }
+    });
+    if (this.upgraded.size > 500) this.upgraded.clear();
     const keep = new Set<string>(onWall);
     plan.forEach((p) => keep.add(this.ensure(p.item, p.settings).key));
     this.entries.forEach((entry, key) => { if (!keep.has(key)) this.evict(entry); });
@@ -142,15 +154,16 @@ export class MemoryCache {
     this.entries.forEach((entry, key) => { if (!keep.has(key)) this.evict(entry); });
   }
 
-  private ordered(urls: string[]): string[] {
-    // Stored copies first: that order is what lets a screen with no network play.
-    return [...urls.filter((u) => this.stored.has(u)), ...urls.filter((u) => !this.stored.has(u))];
+  private ordered(urls: string[], item?: ScreenItem): string[] {
+    // On the card first (that is what lets a screen with no network play); then,
+    // for a still, the small copies before the original (see loadOrder).
+    return loadOrder(urls, this.stored, item ? [item.media.display, item.media.poster] : []);
   }
 
   private async load(entry: Entry): Promise<void> {
     entry.status = 'loading';
     entry.error = null;
-    let ok = entry.kind === 'VIDEO' ? await this.loadVideo(entry) : await this.loadImage(entry, this.ordered(entry.candidates));
+    let ok = entry.kind === 'VIDEO' ? await this.loadVideo(entry) : await this.loadImage(entry, this.ordered(entry.candidates, entry.item));
     if (entry.dead) return;
     if (!ok && entry.kind === 'VIDEO') {
       // A film that will not load (or play here) still has a still: show it rather than nothing.

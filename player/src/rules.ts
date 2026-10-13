@@ -45,6 +45,30 @@ export function chooseCandidates(
   });
 }
 
+/**
+ * The order to try a piece's files in. What is on the card comes first, best
+ * first: it loads in a moment and works offline. Of what must be streamed, the
+ * small copies come before the original — over a slow link a 1000 px copy is on
+ * the wall in seconds where a 40 MB original takes minutes. The agent is
+ * downloading the original meanwhile; once it is on the card the piece is
+ * shown from it (`shouldUpgrade`).
+ */
+export function loadOrder(candidates: string[], stored: Set<string>, small: (string | null | undefined)[]): string[] {
+  const onCard = candidates.filter((u) => stored.has(u));
+  const streamed = candidates.filter((u) => !stored.has(u));
+  const rank = (u: string) => {
+    const i = small.indexOf(u);
+    return i >= 0 ? i : small.length + streamed.indexOf(u);
+  };
+  return [...onCard, ...streamed.sort((a, b) => rank(a) - rank(b))];
+}
+
+/** A piece shown from a lesser copy whose best copy has since reached the card. */
+export function shouldUpgrade(from: string | null, candidates: string[], stored: Set<string>): boolean {
+  const best = candidates[0];
+  return !!from && !!best && from !== best && stored.has(best);
+}
+
 /** The file a still is shown from when everything loads (test-vectors `imageChoice`). */
 export function imageChoice(
   quality: Settings['imageQuality'],

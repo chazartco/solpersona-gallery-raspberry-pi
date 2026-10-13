@@ -314,7 +314,7 @@ class MediaStore:
         for want in self.wants:
             if len(self.running) >= self.max_parallel:
                 break
-            if want.item_id in self.running or any(self.has(u) for u in want.urls):
+            if want.item_id in self.running or self.complete(want):
                 continue
             st = self.items.get(want.item_id)
             if st and st.state == "room":
@@ -351,20 +351,31 @@ class MediaStore:
 
         task.add_done_callback(done)
 
+    def complete(self, want: Want) -> bool:
+        """Done with a piece: its best file is on the card (or it was tried, and the
+        best that could be had is)."""
+        if not want.urls or self.has(want.urls[0]):
+            return True
+        st = self.items.get(want.item_id)
+        return bool(st and st.state == "stored")
+
     async def _store_item(self, want: Want, gen: int) -> str:
         outcome = "failed"
-        for url in want.urls:
-            outcome = await self.download(url, want.rank, gen, want.kind, item_id=want.item_id)
-            if outcome in ("stored", "offline", "room", "gone"):
-                break  # 'failed': the next copy may live on a friendlier host
+        if want.still and not self.has(want.still):
+            # The small copy first: on a slow link the wall can show it from the card
+            # within seconds, while the original — often tens of MB — follows.
+            outcome = await self.download(want.still, want.rank, gen, "IMAGE", item_id=want.item_id)
+        if outcome not in ("offline", "room", "gone"):
+            for url in want.urls:
+                outcome = await self.download(url, want.rank, gen, want.kind, item_id=want.item_id)
+                if outcome in ("stored", "offline", "room", "gone"):
+                    break  # 'failed': the next copy may live on a friendlier host
         if gen != self.gen:
             return "gone"
         st = self.items.setdefault(want.item_id, ItemState())
         now = self._clock()
         if outcome == "stored":
             st.state, st.note = "stored", None
-            if want.still and not self.has(want.still):
-                await self.download(want.still, want.rank, gen, "IMAGE")  # best effort: the wash, offline
         else:
             st.attempts += 1
             if outcome == "room":
