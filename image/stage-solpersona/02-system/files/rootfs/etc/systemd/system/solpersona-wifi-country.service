@@ -1,0 +1,13 @@
+[Unit]
+Description=SolPersona Gallery: apply the Wi-Fi country
+# At boot once the data partition (where a country chosen on the screen is kept)
+# is mounted; and whenever it changes (solpersona-wifi-country.path).
+After=var-lib-solpersona\x2dgallery.mount
+Before=solpersona-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/solpersona-gallery/wifi-country.sh
+
+[Install]
+WantedBy=multi-user.target

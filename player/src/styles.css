@@ -190,6 +190,18 @@ body.debug #blackout .tiny { display: block; }
 .ov-btn.focus { border-color: var(--accent); background: rgba(43,127,245,0.18); }
 .ov-btn.danger.focus { border-color: #f08a6a; background: rgba(240,138,106,0.16); }
 .ov-hint { margin-top: calc(var(--u) * 2); font-size: calc(var(--u) * 1.25); color: var(--ink-faint); }
+#ovWifiPanel .ov-kicker { margin-bottom: calc(var(--u) * 1.4); }
+.ov-list { margin-top: calc(var(--u) * 1.6); max-height: calc(var(--u) * 34); overflow: hidden; display: flex; flex-direction: column; gap: calc(var(--u) * 0.4); }
+.ov-item { display: flex; justify-content: space-between; gap: calc(var(--u) * 2); padding: calc(var(--u) * 0.7) calc(var(--u) * 1.4);
+           border-radius: calc(var(--u) * 0.6); border: 2px solid transparent; font-size: calc(var(--u) * 1.6); }
+.ov-item .dim { font-size: 0.85em; }
+.ov-item.focus { border-color: var(--accent); background: rgba(43,127,245,0.14); }
+.ov-item.current { color: #8fd6a0; }
+.ov-pass { margin-top: calc(var(--u) * 1.6); font-size: calc(var(--u) * 1.6); }
+.ov-pass input { display: block; width: 100%; margin-top: calc(var(--u) * 0.8); padding: calc(var(--u) * 0.9); font: inherit; color: var(--ink);
+                 background: rgba(255,255,255,0.06); border: 2px solid var(--accent); border-radius: calc(var(--u) * 0.6); outline: none; }
+.ov-status { margin-top: calc(var(--u) * 1.2); min-height: 1.4em; font-size: calc(var(--u) * 1.45); color: var(--ink-dim); }
+.ov-status.err { color: #f0a77a; }
 
 /* ---- Debug panel (D, when enabled) ------------------------------------ */
 #debug { position: fixed; top: 0; left: 0; bottom: 0; width: 460px; max-width: 92vw; background: rgba(8,8,10,0.9); border-right: 1px solid rgba(255,255,255,0.09);

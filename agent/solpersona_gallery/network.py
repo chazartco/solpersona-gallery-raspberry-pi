@@ -27,8 +27,10 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import shutil
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from aiohttp import web
@@ -97,8 +99,59 @@ def should_open_hotspot(
     return not connected_this_boot or known_networks == 0
 
 
+def parse_devices(out: str) -> list[dict]:
+    """`nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device`."""
+    devices = []
+    for line in out.splitlines():
+        fields = split_terse(line)
+        if len(fields) >= 4:
+            devices.append({"device": fields[0], "type": fields[1], "state": fields[2], "connection": fields[3]})
+    return devices
+
+
+def default_route_device(out: str) -> Optional[str]:
+    """The device of the preferred default route in `ip -4 route show default` (lowest metric)."""
+    best: Optional[tuple[int, str]] = None
+    for line in out.splitlines():
+        m = re.search(r"\bdev (\S+)", line)
+        if not m:
+            continue
+        metric = re.search(r"\bmetric (\d+)", line)
+        rank = int(metric.group(1)) if metric else 0
+        if best is None or rank < best[0]:
+            best = (rank, m.group(1))
+    return best[1] if best else None
+
+
+def parse_active_wifi(out: str) -> Optional[dict]:
+    """The connected network in `nmcli -t -f ACTIVE,SSID,SIGNAL,FREQ device wifi list`."""
+    for line in out.splitlines():
+        fields = split_terse(line)
+        if len(fields) >= 4 and fields[0] == "yes":
+            freq = int(re.sub(r"\D", "", fields[3]) or 0)
+            band = "5 GHz" if freq >= 4900 else "2.4 GHz" if freq else None
+            if freq >= 5925:
+                band = "6 GHz"
+            return {"ssid": fields[1], "signal": int(fields[2]) if fields[2].isdigit() else None, "freqMhz": freq or None, "band": band}
+    return None
+
+
+def parse_reg_country(out: str) -> Optional[str]:
+    """The global regulatory domain from `iw reg get` ('country GB: DFS-ETSI'); '00' is world-wide."""
+    for line in out.splitlines():
+        if line.startswith("phy#"):
+            break  # per-radio sections come after the global one
+        m = re.match(r"^country (\w\w):", line.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
 class Network:
-    def __init__(self, ssid_suffix: str, password: str, manage: bool, on_change: Callable[[], None]) -> None:
+    def __init__(
+        self, ssid_suffix: str, password: str, manage: bool, on_change: Callable[[], None], country_file: Optional[Path] = None
+    ) -> None:
+        self.country_file = country_file
         self.ssid = f"SolPersona-Gallery-{ssid_suffix}"
         self.password = password
         self.enabled = manage and shutil.which("nmcli") is not None
@@ -117,6 +170,8 @@ class Network:
         self.hotspot_since = 0.0
         self._portal: Optional[web.AppRunner] = None
         self._busy = False
+        self.joining: Optional[str] = None  # the SSID being joined, for the screen
+        self.manual_until = 0.0  # a setup network opened from the menu stays this long
 
     def public(self) -> dict:
         out = dict(self.status)
@@ -126,7 +181,16 @@ class Network:
             else None
         )
         out["error"] = self.error
+        out["joining"] = self.joining
+        out["scan"] = self.scan
+        out["manageable"] = self.enabled and self.wifi_device is not None
         return out
+
+    async def rescan(self) -> None:
+        """Networks in range, for the screen's own Wi-Fi panel."""
+        if self.enabled and not self.hotspot and not self._busy:
+            await self.scan_networks()
+            self.on_change()
 
     # Reading NetworkManager -----------------------------------------------------
 
@@ -134,36 +198,63 @@ class Network:
         code, out = await run("nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device")
         if code != 0:
             return
-        kind = ssid = None
         self.wifi_device = None
         self.ethernet_carrier = False
-        connected_dev = None
-        for line in out.splitlines():
-            fields = split_terse(line)
-            if len(fields) < 4:
-                continue
-            dev, typ, state, conn = fields[:4]
-            if typ == "wifi":
-                self.wifi_device = self.wifi_device or dev
-            if typ == "ethernet" and state not in ("unavailable", "unmanaged"):
+        devices: list[dict] = []
+        for d in parse_devices(out):
+            if d["type"] == "wifi":
+                self.wifi_device = self.wifi_device or d["device"]
+            if d["type"] == "ethernet" and d["state"] not in ("unavailable", "unmanaged"):
                 self.ethernet_carrier = True
-            if state == "connected" and typ in ("ethernet", "wifi") and conn != HOTSPOT_CONNECTION:
-                kind, ssid, connected_dev = typ, (conn if typ == "wifi" else None), dev
-        ip = None
-        if connected_dev:
-            code, out = await run("nmcli", "-t", "-g", "IP4.ADDRESS", "device", "show", connected_dev)
-            ip = (out.strip().split("|")[0].split("/")[0].strip() or None) if code == 0 else None
+            if d["state"] == "connected" and d["type"] in ("ethernet", "wifi") and d["connection"] != HOTSPOT_CONNECTION:
+                devices.append(d)
+        for d in devices:
+            code, out = await run("nmcli", "-t", "-g", "IP4.ADDRESS", "device", "show", d["device"])
+            d["ip"] = (out.strip().split("|")[0].split("/")[0].strip() or None) if code == 0 else None
+        # With a cable and Wi-Fi both up, traffic goes where the default route is.
+        code, out = await run("ip", "-4", "route", "show", "default")
+        via = default_route_device(out) if code == 0 else None
+        primary = next((d for d in devices if d["device"] == via), devices[0] if devices else None)
+        wifi = None
+        if any(d["type"] == "wifi" for d in devices):
+            code, out = await run("nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL,FREQ", "device", "wifi", "list", "--rescan", "no")
+            wifi = parse_active_wifi(out) if code == 0 else None
+        code, out = await run("iw", "reg", "get")
+        country = parse_reg_country(out) if code == 0 else None
         code, out = await run("nmcli", "-t", "-f", "TYPE", "connection", "show")
         if code == 0:
             self.known = sum(1 for line in out.splitlines() if line.strip() == "802-11-wireless") - (1 if self.hotspot else 0)
-        online = kind is not None
-        changed = online != self.status.get("online") or ssid != self.status.get("ssid") or ip != self.status.get("ip")
-        self.status = {"online": online, "kind": kind, "ssid": ssid, "ip": ip}
-        if online:
+        status = {
+            "online": primary is not None,
+            "kind": primary["type"] if primary else None,
+            "ssid": primary["connection"] if primary and primary["type"] == "wifi" else None,
+            "ip": primary.get("ip") if primary else None,
+            "via": primary["device"] if primary else None,
+            "devices": [{"device": d["device"], "type": d["type"], "ip": d.get("ip"), "connection": d["connection"]} for d in devices],
+            "wifi": wifi,
+            "country": country,
+        }
+        changed = {k: status[k] for k in ("online", "kind", "ssid", "ip", "via")} != {k: self.status.get(k) for k in ("online", "kind", "ssid", "ip", "via")}
+        self.status = status
+        if status["online"]:
             self.last_online = time.monotonic()
             self.connected_this_boot = True
         if changed:
             self.on_change()
+
+    def set_country(self, code: str) -> bool:
+        """The Wi-Fi country, chosen on the screen or the setup page. Kept on the data
+        partition; a root service (solpersona-wifi-country.path) applies it at once."""
+        code = (code or "").strip().upper()
+        if not re.match(r"^[A-Z]{2}$", code) or self.country_file is None:
+            return False
+        try:
+            self.country_file.write_text(code + "\n")
+        except OSError as error:
+            log.warning("could not save the Wi-Fi country: %s", error)
+            return False
+        log.info("Wi-Fi country set to %s", code)
+        return True
 
     async def scan_networks(self) -> None:
         if not self.wifi_device:
@@ -201,7 +292,8 @@ class Network:
         now = time.monotonic()
         online = bool(self.status.get("online"))
         if self.hotspot:
-            if online:
+            # Opened from the screen's menu: it stays up for ten minutes even with a cable in.
+            if online and now >= self.manual_until:
                 await self.stop_hotspot()
                 return
             portal_idle = now - self.portal_seen > PORTAL_BUSY_S
@@ -224,9 +316,11 @@ class Network:
         ):
             await self.start_hotspot()
 
-    async def start_hotspot(self) -> None:
+    async def start_hotspot(self, manual: bool = False) -> None:
         if not self.wifi_device:
             return
+        if manual:
+            self.manual_until = time.monotonic() + 600
         await self.scan_networks()  # scanning is poor once the radio is an access point
         await run("nmcli", "connection", "delete", HOTSPOT_CONNECTION)
         args = [
@@ -261,6 +355,10 @@ class Network:
         """Leave setup mode and join the person's network; come back with the reason if it fails."""
         self._busy = True
         self.error = None
+        self.joining = ssid
+        was_setup = self.hotspot
+        self.manual_until = 0.0
+        self.on_change()
         try:
             await self.stop_hotspot()
             await asyncio.sleep(2)
@@ -269,18 +367,22 @@ class Network:
                 args += ["password", password]
             code, out = await run(*args, timeout=45)
             await self.refresh()
-            if code != 0 or not self.status.get("online"):
+            # Joined means on that Wi-Fi — a cable being plugged in proves nothing about it.
+            joined = code == 0 and any(d["type"] == "wifi" and d["connection"] == ssid for d in self.status.get("devices") or [])
+            if not joined:
                 log.info("could not join %s: %s", ssid, out.strip()[:200])
                 self.error = f"Couldn't join {ssid}. Check the name and password, then try again."
                 # Forget the failed attempt, so a wrong password is not retried forever.
                 await run("nmcli", "connection", "delete", "id", ssid)
-                await self.start_hotspot()
+                if was_setup or not self.status.get("online"):
+                    await self.start_hotspot()
             else:
                 self.error = None
                 log.info("joined %s", ssid)
-            self.on_change()
         finally:
             self._busy = False
+            self.joining = None
+            self.on_change()
 
     # The captive page --------------------------------------------------------------------
 
@@ -307,7 +409,8 @@ class Network:
 
     async def _portal_page(self, request: web.Request) -> web.Response:
         self.portal_seen = time.monotonic()
-        return web.Response(text=portal_html(self.ssid, self.scan, self.error), content_type="text/html", headers={"Cache-Control": "no-store"})
+        page = portal_html(self.ssid, self.scan, self.error, self.status.get("country"))
+        return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
     async def _portal_connect(self, request: web.Request) -> web.Response:
         self.portal_seen = time.monotonic()
@@ -315,9 +418,13 @@ class Network:
         # A typed name wins over a ticked one: it is the more deliberate choice.
         ssid = str(form.get("other") or "").strip() or str(form.get("ssid") or "").strip()
         password = str(form.get("password") or "")
+        country = str(form.get("country") or "").strip()
         if not ssid or len(ssid.encode("utf-8")) > 32 or (password and not 8 <= len(password) <= 63):
             self.error = "That name or password does not look right. Wi-Fi passwords are 8 to 63 characters."
-            return web.Response(text=portal_html(self.ssid, self.scan, self.error), content_type="text/html")
+            page = portal_html(self.ssid, self.scan, self.error, country or self.status.get("country"))
+            return web.Response(text=page, content_type="text/html")
+        if country:
+            self.set_country(country)
         asyncio.get_running_loop().call_later(1.5, lambda: asyncio.ensure_future(self.join(ssid, password)))
         return web.Response(text=portal_done_html(ssid, self.ssid), content_type="text/html")
 
@@ -329,14 +436,34 @@ h1{font:400 1.6rem/1.2 Georgia,serif;margin:.5rem 0 1rem}
 .k{font-size:.8rem;letter-spacing:.16em;text-transform:uppercase;color:#2b7ff5}
 label.n{display:flex;justify-content:space-between;gap:1rem;padding:.8rem 1rem;border:1px solid #2a2a2e;border-radius:.6rem;margin:.5rem 0;cursor:pointer}
 label.n:has(input:checked){border-color:#2b7ff5;background:#11203a}
-input[type=text],input[type=password]{width:100%;box-sizing:border-box;font:inherit;padding:.75rem;border-radius:.6rem;border:1px solid #3a3a3e;background:#151517;color:inherit}
+input[type=text],input[type=password],select{width:100%;box-sizing:border-box;font:inherit;padding:.75rem;border-radius:.6rem;border:1px solid #3a3a3e;background:#151517;color:inherit}
 button{font:inherit;font-weight:600;width:100%;padding:.85rem;border:0;border-radius:.6rem;background:#2b7ff5;color:#fff;margin-top:1rem}
 .err{background:#3a1d12;color:#ffc9b0;padding:.75rem 1rem;border-radius:.6rem}
 .dim{color:#9c9a95;font-size:.9rem}
 """
 
 
-def portal_html(hotspot: str, networks: list[dict], error: Optional[str]) -> str:
+# Wi-Fi rules differ by country (channels, power, 5 GHz). Until one is set the
+# Pi uses the cautious world-wide rules: 2.4 GHz only. The player carries the same list.
+COUNTRIES = [
+    ("US", "United States"), ("GB", "United Kingdom"), ("CA", "Canada"), ("AU", "Australia"), ("NZ", "New Zealand"),
+    ("IE", "Ireland"), ("DE", "Germany"), ("FR", "France"), ("ES", "Spain"), ("IT", "Italy"), ("PT", "Portugal"),
+    ("NL", "Netherlands"), ("BE", "Belgium"), ("LU", "Luxembourg"), ("CH", "Switzerland"), ("AT", "Austria"),
+    ("DK", "Denmark"), ("SE", "Sweden"), ("NO", "Norway"), ("FI", "Finland"), ("IS", "Iceland"), ("PL", "Poland"),
+    ("CZ", "Czechia"), ("SK", "Slovakia"), ("HU", "Hungary"), ("RO", "Romania"), ("BG", "Bulgaria"), ("GR", "Greece"),
+    ("HR", "Croatia"), ("SI", "Slovenia"), ("EE", "Estonia"), ("LV", "Latvia"), ("LT", "Lithuania"), ("UA", "Ukraine"),
+    ("TR", "Türkiye"), ("IL", "Israel"), ("AE", "United Arab Emirates"), ("SA", "Saudi Arabia"), ("ZA", "South Africa"),
+    ("NG", "Nigeria"), ("KE", "Kenya"), ("EG", "Egypt"), ("MA", "Morocco"), ("IN", "India"), ("SG", "Singapore"),
+    ("MY", "Malaysia"), ("TH", "Thailand"), ("VN", "Vietnam"), ("PH", "Philippines"), ("ID", "Indonesia"),
+    ("HK", "Hong Kong"), ("TW", "Taiwan"), ("KR", "South Korea"), ("JP", "Japan"), ("CN", "China"),
+    ("MX", "Mexico"), ("BR", "Brazil"), ("AR", "Argentina"), ("CL", "Chile"), ("CO", "Colombia"), ("PE", "Peru"),
+]
+
+
+def portal_html(hotspot: str, networks: list[dict], error: Optional[str], country: Optional[str] = None) -> str:
+    options = '<option value="">Choose your country…</option>' + "".join(
+        f'<option value="{c}"{" selected" if c == country else ""}>{html.escape(n)}</option>' for c, n in COUNTRIES
+    )
     rows = "".join(
         f'<label class="n"><span><input type="radio" name="ssid" value="{html.escape(n["ssid"], quote=True)}"> '
         f'{html.escape(n["ssid"])}</span><span class="dim">{"🔒 " if n["secured"] else ""}{n["signal"]}%</span></label>'
@@ -350,6 +477,8 @@ def portal_html(hotspot: str, networks: list[dict], error: Optional[str]) -> str
 <p class="dim">Choose the network this screen should use.</p>{rows or '<p class="dim">No networks were found. Type the name below.</p>'}
 <p><input type="text" name="other" placeholder="Or type a network name" autocomplete="off" autocapitalize="off" spellcheck="false"></p>
 <p><input type="password" name="password" placeholder="Password" autocomplete="off"></p>
+<p class="dim">Your country sets the Wi-Fi rules — and lets the screen use 5 GHz.</p>
+<p><select name="country">{options}</select></p>
 <button type="submit">Connect</button></form>
 <p class="dim">You are connected to {html.escape(hotspot)}, the screen's own setup network.</p></main></body></html>"""
 

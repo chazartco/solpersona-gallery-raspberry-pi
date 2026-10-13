@@ -197,6 +197,7 @@ class MediaStore:
         self._last_index_save = 0.0
         self._refused: dict[str, int] = {}  # item → bytes it needed when there was no room
         self._partial: dict[str, int] = {}  # url → bytes written so far
+        self._dl_info: dict[str, dict] = {}  # url → {item, total, started}, while downloading
         self._last_need = 0
 
     # Start-up ------------------------------------------------------------------
@@ -260,6 +261,19 @@ class MediaStore:
 
     def total_bytes(self) -> int:
         return sum(f.bytes for f in self.files.values())
+
+    def downloads(self) -> list[dict]:
+        """Downloads in flight, for the screen: what, how far, how fast."""
+        now = time.monotonic()
+        out = []
+        for url, info in self._dl_info.items():
+            done = self._partial.get(url, 0)
+            elapsed = max(0.5, now - info["started"])
+            out.append({
+                "itemId": info["item"], "file": short(url), "bytes": done, "total": info["total"] or None,
+                "speed": round(done / elapsed), "seconds": round(elapsed),
+            })
+        return out
 
     def in_flight_bytes(self) -> int:
         """Bytes already written to downloads not yet finished: ours too, when the
@@ -391,10 +405,12 @@ class MediaStore:
         """One URL onto the card. → stored | failed | offline | room | gone"""
         if self.has(url):
             return "stored"
+        self._dl_info[url] = {"item": item_id, "total": 0, "started": time.monotonic()}
         try:
             outcome = await self._download(url, rank, gen, kind)
         finally:
             self._partial.pop(url, None)
+            self._dl_info.pop(url, None)
         if outcome == "room" and item_id:
             self._refused[item_id] = self._last_need
         return outcome
@@ -410,6 +426,8 @@ class MediaStore:
                     log.info("download %s: HTTP %s", short(url), res.status)
                     return "failed"
                 length = res.content_length or 0
+                if url in self._dl_info:
+                    self._dl_info[url]["total"] = length
                 if length > MAX_FILE_BYTES:
                     return "failed"
                 if not self._make_room(length, rank):

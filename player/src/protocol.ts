@@ -91,11 +91,30 @@ export interface Capabilities {
 
 export interface NetworkInfo {
   online: boolean | null;
+  /** The connection traffic goes over (the default route). */
   kind: 'ethernet' | 'wifi' | null;
   ssid: string | null;
   ip: string | null;
+  via?: string | null;
+  devices?: { device: string; type: string; ip: string | null; connection: string }[];
+  wifi?: { ssid: string; signal: number | null; freqMhz: number | null; band: string | null } | null;
+  /** The Wi-Fi regulatory country; '00' is the world-wide default (2.4 GHz only). */
+  country?: string | null;
   hotspot: { ssid: string; secured: boolean; qr: string } | null;
   error: string | null;
+  joining?: string | null;
+  scan?: { ssid: string; signal: number; secured: boolean }[];
+  manageable?: boolean;
+}
+
+export interface Download {
+  itemId: string;
+  file: string;
+  bytes: number;
+  total: number | null;
+  /** Bytes per second, averaged since the download began. */
+  speed: number;
+  seconds: number;
 }
 
 export interface Registration {
@@ -124,7 +143,7 @@ export interface AgentState {
   online: boolean;
   lastError: string | null;
   capabilities: Capabilities;
-  kept: { on: boolean; stored: number; total: number; error: string | null };
+  kept: { on: boolean; stored: number; total: number; error: string | null; downloads?: Download[]; mb?: number };
   dark: boolean;
   network: NetworkInfo | null;
   appVersion: string;
@@ -173,5 +192,7 @@ export interface PlayerReport {
 export type PlayerMessage =
   | { type: 'report'; state: PlayerReport; inUse: string[] }
   | { type: 'duration'; itemId: string; ms: number }
-  | { type: 'action'; action: 'sample' | 'stop-sample' | 'forget' | 'reload' }
+  | { type: 'action'; action: 'sample' | 'stop-sample' | 'forget' | 'reload' | 'wifi-scan' | 'wifi-setup' }
+  | { type: 'action'; action: 'wifi-join'; ssid: string; password: string }
+  | { type: 'action'; action: 'wifi-country'; country: string }
   | { type: 'debug'; on: boolean };

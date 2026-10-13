@@ -1,7 +1,10 @@
 from solpersona_gallery.api import parse_retry_after
 from solpersona_gallery.clock import ServerClock
 from solpersona_gallery.config import load
-from solpersona_gallery.network import should_open_hotspot, split_terse, wifi_qr_text
+from solpersona_gallery.network import (
+    Network, default_route_device, parse_active_wifi, parse_devices, parse_reg_country, portal_html,
+    should_open_hotspot, split_terse, wifi_qr_text,
+)
 from solpersona_gallery.rules import DEFAULT_SETTINGS, choose_candidates, normalise_settings
 
 
@@ -71,6 +74,31 @@ def test_hotspot_policy():
     assert not should_open_hotspot(**{**base, "connected_this_boot": True})
     # …unless it knows no network at all.
     assert should_open_hotspot(**{**base, "connected_this_boot": True, "known_networks": 0})
+
+
+def test_which_network_carries_the_traffic():
+    devices = parse_devices("eth0:ethernet:connected:Wired connection 1\nwlan0:wifi:connected:Home\\:5G\nlo:loopback:unmanaged:\n")
+    assert [d["device"] for d in devices] == ["eth0", "wlan0", "lo"] and devices[1]["connection"] == "Home:5G"
+    routes = "default via 192.168.1.1 dev wlan0 proto dhcp src 192.168.1.40 metric 600\ndefault via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.41 metric 100\n"
+    assert default_route_device(routes) == "eth0"  # the cable wins: lower metric
+    assert default_route_device("") is None
+
+
+def test_wifi_signal_band_and_country():
+    out = "no:Neighbours:40:2437 MHz\nyes:Home:72:5180 MHz\n"
+    assert parse_active_wifi(out) == {"ssid": "Home", "signal": 72, "freqMhz": 5180, "band": "5 GHz"}
+    assert parse_active_wifi("yes:Home:55:2412 MHz")["band"] == "2.4 GHz"
+    assert parse_active_wifi("no:x:1:2412 MHz") is None
+    assert parse_reg_country("global\ncountry 00: DFS-UNSET\n\t(2402 - 2472 @ 40), (6, 20)\n\nphy#0 (self-managed)\ncountry US: DFS-FCC\n") == "00"
+    assert parse_reg_country("global\ncountry GB: DFS-ETSI\n") == "GB"
+
+
+def test_the_country_chosen_on_the_screen_is_kept(tmp_path):
+    net = Network("AB12", "", manage=False, on_change=lambda: None, country_file=tmp_path / "wifi-country")
+    assert net.set_country("gb") and (tmp_path / "wifi-country").read_text().strip() == "GB"
+    assert not net.set_country("Great Britain") and not net.set_country("")
+    page = portal_html("SolPersona-Gallery-AB12", [], None, "GB")
+    assert '<option value="GB" selected>United Kingdom</option>' in page
 
 
 def test_wifi_qr_and_nmcli_parsing():

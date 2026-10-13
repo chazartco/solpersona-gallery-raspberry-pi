@@ -40,7 +40,7 @@ const view = new View(player, agent, clock, stage);
 function handleKey(key: string): void {
   const mode = player.mode;
   if (view.overlayOpen) {
-    if (key === 'Escape' || key === 'Backspace' || key === 'BrowserBack' || key === 'GoBack') view.openOverlay(false);
+    if (key === 'Escape' || key === 'Backspace' || key === 'BrowserBack' || key === 'GoBack') view.overlayBack();
     else view.overlayKey(key);
     view.paint();
     return;
@@ -64,6 +64,15 @@ player.onChange = () => view.paint();
 
 document.addEventListener('keydown', (event) => {
   if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if ((event.target as HTMLElement | null)?.tagName === 'INPUT') {
+    // Typing the Wi-Fi password: letters (and Backspace) go into the field.
+    view.touchOverlay();
+    if (event.key === 'Enter' || event.key === 'Escape') {
+      event.preventDefault();
+      handleKey(event.key);
+    }
+    return;
+  }
   event.preventDefault();
   handleKey(event.key);
 });

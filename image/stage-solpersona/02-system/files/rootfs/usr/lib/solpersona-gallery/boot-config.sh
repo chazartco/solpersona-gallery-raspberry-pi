@@ -10,12 +10,7 @@ if [ -n "${SPG_TIMEZONE:-}" ] && [ -f "/usr/share/zoneinfo/$SPG_TIMEZONE" ]; the
 	echo "$SPG_TIMEZONE" > /etc/timezone
 fi
 
-if [ -n "${SPG_WIFI_COUNTRY:-}" ]; then
-	iw reg set "$SPG_WIFI_COUNTRY" 2>/dev/null || true
-fi
-# Raspberry Pi OS keeps the radio off until a country is set; the screen needs
-# it for Wi-Fi and for its setup network. (Unset: the world regulatory domain.)
-rfkill unblock wlan 2>/dev/null || true
+/usr/lib/solpersona-gallery/wifi-country.sh
 
 mkdir -p /run/solpersona-gallery
 chown gallery:gallery /run/solpersona-gallery

@@ -41,7 +41,11 @@ async def run(cfg: config_module.Config) -> None:
         optimiser=make_optimiser(display.logical) if cfg.optimise_images else None,
     )
     store.load()
-    network = Network(serial_suffix(), cfg.hotspot_password, cfg.manage_hardware, on_change=lambda: holder["controller"].changed())
+    network = Network(
+        serial_suffix(), cfg.hotspot_password, cfg.manage_hardware,
+        on_change=lambda: holder["controller"].changed(),
+        country_file=cfg.state_dir / "wifi-country",
+    )
     controller = Controller(cfg=cfg, files=StateFiles(cfg.state_dir), store=store, display=display, network=network, session=session)
     holder["controller"] = controller
     controller.on_tick = lambda: notify("WATCHDOG=1")

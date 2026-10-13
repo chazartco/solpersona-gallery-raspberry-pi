@@ -104,14 +104,28 @@
   <!-- OK / Enter on a remote or keyboard (SPEC §11) -->
   <div id="overlay" role="dialog" aria-label="This screen">
     <div class="ov-panel">
-      <div class="ov-kicker">This screen</div>
-      <div class="ov-name" id="ovName"></div>
-      <div class="ov-rows" id="ovRows"></div>
-      <div class="ov-buttons">
-        <div class="ov-btn" id="ovForget" data-action="forget">Forget this account</div>
-        <div class="ov-btn" id="ovDebug" data-action="debug">Show debug</div>
+      <div id="ovMain">
+        <div class="ov-kicker">This screen</div>
+        <div class="ov-name" id="ovName"></div>
+        <div class="ov-rows" id="ovRows"></div>
+        <div class="ov-buttons">
+          <div class="ov-btn" id="ovForget">Forget this account</div>
+          <div class="ov-btn" id="ovWifi">Wi-Fi</div>
+          <div class="ov-btn" id="ovDebug">Show debug</div>
+        </div>
       </div>
-      <div class="ov-hint">Back to close</div>
+      <!-- Wi-Fi from the screen itself: arrows to choose, a keyboard for the password -->
+      <div id="ovWifiPanel" hidden>
+        <div class="ov-kicker">Wi-Fi</div>
+        <div class="ov-rows" id="ovWifiRows"></div>
+        <div class="ov-list" id="ovWifiList"></div>
+        <div class="ov-pass" id="ovPass" hidden>
+          <div id="ovPassLabel"></div>
+          <input id="ovPassInput" type="password" autocomplete="off" spellcheck="false" maxlength="63">
+        </div>
+        <div class="ov-status" id="ovWifiStatus"></div>
+      </div>
+      <div class="ov-hint" id="ovHint">Back to close</div>
     </div>
   </div>
 

@@ -771,9 +771,29 @@ class Controller:
                 asyncio.ensure_future(self.forget())
             elif action == "reload" and self.mode == "player":
                 self.drop_playlist()
+            elif isinstance(action, str) and action.startswith("wifi-"):
+                self._wifi_action(action, msg)
         elif kind == "debug":
             self.debug_watchers = 1 if msg.get("on") else 0
             self.changed()
+
+    def _wifi_action(self, action: str, msg: dict) -> None:
+        """The screen's own Wi-Fi panel (keyboard or remote): scan, join, country, setup network."""
+        net = self.network
+        if net is None or not getattr(net, "enabled", False):
+            return
+        if action == "wifi-scan":
+            asyncio.ensure_future(net.rescan())
+        elif action == "wifi-join":
+            ssid = msg.get("ssid")
+            password = msg.get("password") or ""
+            if isinstance(ssid, str) and 0 < len(ssid.encode("utf-8")) <= 32 and isinstance(password, str) and len(password) <= 63:
+                asyncio.ensure_future(net.join(ssid, password))
+        elif action == "wifi-country":
+            if net.set_country(str(msg.get("country") or "")):
+                self.changed()
+        elif action == "wifi-setup":
+            asyncio.ensure_future(net.start_hotspot(manual=True))
 
     def record_duration(self, item_id: Any, ms: Any) -> None:
         """A video's measured length, once per item per show version (SPEC §6.4)."""
@@ -1073,7 +1093,10 @@ class Controller:
             "online": self.online,
             "lastError": self.last_error,
             "capabilities": self.capabilities(),
-            "kept": {"on": self.keep_offline, "stored": stored, "total": total, "error": self.store.error},
+            "kept": {
+                "on": self.keep_offline, "stored": stored, "total": total, "error": self.store.error,
+                "downloads": self.store.downloads(), "mb": round(self.store.total_bytes() / MiB, 1),
+            },
             "dark": self.dark,
             "network": self.network.public() if self.network else None,
             "appVersion": self.version,

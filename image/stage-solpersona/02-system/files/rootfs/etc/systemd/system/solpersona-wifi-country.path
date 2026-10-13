@@ -1,0 +1,8 @@
+[Unit]
+Description=SolPersona Gallery: apply a Wi-Fi country chosen on the screen
+
+[Path]
+PathChanged=/var/lib/solpersona-gallery/wifi-country
+
+[Install]
+WantedBy=multi-user.target

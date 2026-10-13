@@ -1,5 +1,8 @@
 import type { AgentLink } from './agent';
 import type { PlayerClock } from './clock';
+import { COUNTRIES, countryName } from './countries';
+import type { Entry } from './cache';
+import type { Download, NetworkInfo, ScreenItem } from './protocol';
 import type { Player } from './player';
 import { qrDataUrl } from './qr';
 import { el } from './renderer';
@@ -23,6 +26,45 @@ function fmtDuration(ms: number | null | undefined): string {
   return `${Math.floor(s / 60)}:${pad2(s % 60)}`;
 }
 
+type WifiItem =
+  | { kind: 'country' }
+  | { kind: 'net'; ssid: string; signal: number; secured: boolean }
+  | { kind: 'rescan' }
+  | { kind: 'phone' };
+
+export function fmtBytes(n: number | null | undefined): string {
+  if (n === null || n === undefined || !isFinite(n)) return '?';
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 ** 3).toFixed(1) + ' GB';
+  if (n >= 1024 * 1024) return (n / 1024 ** 2).toFixed(1) + ' MB';
+  return Math.max(0, Math.round(n / 1024)) + ' KB';
+}
+
+/** "Ethernet (eth0) · 192.168.1.41" or "Wi-Fi Home · 72% · 5 GHz · 192.168.1.40" — the one traffic goes over. */
+export function networkLine(net: NetworkInfo | null | undefined): string {
+  if (!net) return '—';
+  if (net.hotspot) return `setup network ${net.hotspot.ssid} is open`;
+  if (!net.kind) return 'not connected';
+  const via = net.via ? ` (${net.via})` : '';
+  const others = (net.devices ?? []).filter((d) => d.device !== net.via).map((d) => `also ${d.type === 'wifi' ? 'Wi-Fi' : 'Ethernet'}`);
+  if (net.kind === 'ethernet') return [`Ethernet${via}`, net.ip, ...others].filter(Boolean).join(' · ');
+  const w = net.wifi;
+  return [`Wi-Fi ${net.ssid ?? ''}${via}`, w?.signal != null ? `${w.signal}%` : null, w?.band, net.ip, ...others].filter(Boolean).join(' · ');
+}
+
+/** "a:9c2e… 61% of 250.0 MB · 0.8 MB/s". */
+export function downloadLine(d: Download): string {
+  const pct = d.total ? ` ${Math.floor((d.bytes / d.total) * 100)}% of ${fmtBytes(d.total)}` : ` ${fmtBytes(d.bytes)}`;
+  return `${d.file.split('/').pop()}${pct} · ${fmtBytes(d.speed)}/s`;
+}
+
+/** Which copy a piece is shown from, how big, and from where: "original 1920×1280 · card". */
+function describeFile(entry: Entry | null, item: ScreenItem | null, stored: Set<string>): string {
+  if (!entry || !item || !entry.from) return '—';
+  const m = item.media;
+  const which = entry.from === m.original ? 'original' : entry.from === m.display ? 'display copy' : entry.from === m.poster ? 'poster' : 'fallback copy';
+  return `${which} ${entry.w}×${entry.h} · ${stored.has(entry.from) ? 'from the card' : 'streamed'}`;
+}
+
 function esc(value: unknown): string {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -33,6 +75,11 @@ export class View {
   private overlayFocus = 0;
   private forgetArmed = 0;
   private overlayIdle = 0;
+  private overlayView: 'main' | 'wifi' | 'password' = 'main';
+  private wifiFocus = 0;
+  private countryIndex = 0;
+  private joinTarget = '';
+  private wifiNote = '';
   private qrCacheText = new Map<string, string>();
 
   constructor(
@@ -226,17 +273,41 @@ export class View {
 
   openOverlay(open: boolean): void {
     this.overlayOpen = open;
+    this.overlayView = 'main';
     this.overlayFocus = 0;
     this.forgetArmed = 0;
     this.overlayIdle = Date.now();
     $('overlay').classList.toggle('on', open);
+    if (!open) (document.activeElement as HTMLElement | null)?.blur?.();
     if (open) this.paintOverlay();
+  }
+
+  /** Typing a password counts as activity: the overlay stays open. */
+  touchOverlay(): void {
+    this.overlayIdle = Date.now();
+  }
+
+  /** Back / Esc: one level up, or closed. */
+  overlayBack(): void {
+    if (this.overlayView === 'password') this.showWifiList();
+    else if (this.overlayView === 'wifi') {
+      this.overlayView = 'main';
+      this.overlayFocus = 1;
+      this.paintOverlay();
+    } else this.openOverlay(false);
   }
 
   overlayKey(key: string): void {
     this.overlayIdle = Date.now();
-    if (key === 'ArrowLeft' || key === 'ArrowUp') this.overlayFocus = 0;
-    else if (key === 'ArrowRight' || key === 'ArrowDown') this.overlayFocus = 1;
+    if (this.overlayView === 'main') this.mainKey(key);
+    else if (this.overlayView === 'wifi') this.wifiKey(key);
+    else if (this.overlayView === 'password' && key === 'Enter') this.joinWithPassword();
+    this.paintOverlay();
+  }
+
+  private mainKey(key: string): void {
+    if (key === 'ArrowLeft' || key === 'ArrowUp') this.overlayFocus = Math.max(0, this.overlayFocus - 1);
+    else if (key === 'ArrowRight' || key === 'ArrowDown') this.overlayFocus = Math.min(2, this.overlayFocus + 1);
     else if (key === 'Enter') {
       if (this.overlayFocus === 0) {
         if (this.forgetArmed && Date.now() - this.forgetArmed < 8000) {
@@ -245,26 +316,106 @@ export class View {
           return;
         }
         this.forgetArmed = Date.now();
+      } else if (this.overlayFocus === 1) {
+        const country = this.player.a?.network?.country;
+        const i = COUNTRIES.findIndex(([c]) => c === country);
+        this.countryIndex = i >= 0 ? i : 0;
+        this.showWifiList();
+        this.agent.send({ type: 'action', action: 'wifi-scan' });
       } else {
         this.setDebug(!this.debugOn);
       }
     }
+  }
+
+  private wifiItems(): WifiItem[] {
+    const net = this.player.a?.network;
+    const items: WifiItem[] = [{ kind: 'country' }];
+    (net?.scan ?? []).forEach((n) => items.push({ kind: 'net', ...n }));
+    items.push({ kind: 'rescan' }, { kind: 'phone' });
+    return items;
+  }
+
+  private showWifiList(): void {
+    this.overlayView = 'wifi';
+    this.wifiFocus = Math.min(this.wifiFocus, this.wifiItems().length - 1);
+    const input = $('ovPassInput') as HTMLInputElement;
+    input.value = '';
+    input.blur();
     this.paintOverlay();
   }
 
+  private wifiKey(key: string): void {
+    const items = this.wifiItems();
+    const item = items[this.wifiFocus];
+    if (key === 'ArrowUp') this.wifiFocus = Math.max(0, this.wifiFocus - 1);
+    else if (key === 'ArrowDown') this.wifiFocus = Math.min(items.length - 1, this.wifiFocus + 1);
+    else if ((key === 'ArrowLeft' || key === 'ArrowRight') && item?.kind === 'country') {
+      const n = COUNTRIES.length;
+      this.countryIndex = (this.countryIndex + (key === 'ArrowRight' ? 1 : -1) + n) % n;
+    } else if (key === 'Enter' && item) {
+      if (item.kind === 'country') {
+        this.agent.send({ type: 'action', action: 'wifi-country', country: COUNTRIES[this.countryIndex]![0] });
+        this.wifiNote = `Country set to ${COUNTRIES[this.countryIndex]![1]}.`;
+      } else if (item.kind === 'rescan') {
+        this.agent.send({ type: 'action', action: 'wifi-scan' });
+        this.wifiNote = 'Looking for networks…';
+      } else if (item.kind === 'phone') {
+        this.agent.send({ type: 'action', action: 'wifi-setup' });
+        this.openOverlay(false);
+      } else if (item.kind === 'net') {
+        this.joinTarget = item.ssid;
+        if (!item.secured) {
+          this.agent.send({ type: 'action', action: 'wifi-join', ssid: item.ssid, password: '' });
+          this.wifiNote = '';
+          return;
+        }
+        this.overlayView = 'password';
+        this.paintOverlay();
+        const input = $('ovPassInput') as HTMLInputElement;
+        input.value = '';
+        input.focus();
+      }
+    }
+  }
+
+  private joinWithPassword(): void {
+    const input = $('ovPassInput') as HTMLInputElement;
+    const password = input.value;
+    if (password.length > 0 && password.length < 8) {
+      this.wifiNote = 'Wi-Fi passwords are 8 to 63 characters.';
+      return;
+    }
+    this.agent.send({ type: 'action', action: 'wifi-join', ssid: this.joinTarget, password });
+    this.wifiNote = '';
+    this.showWifiList();
+  }
+
   private paintOverlay(): void {
-    if (Date.now() - this.overlayIdle > 30000) {
+    if (Date.now() - this.overlayIdle > 60000) {
       this.openOverlay(false);
       return;
     }
     const a = this.player.a;
     const net = a?.network;
+    const main = this.overlayView === 'main';
+    ($('ovMain') as HTMLElement).hidden = !main;
+    ($('ovWifiPanel') as HTMLElement).hidden = main;
+    $('ovHint').textContent = this.overlayView === 'password'
+      ? 'Type the password, then Enter · Esc to go back'
+      : this.overlayView === 'wifi' ? '↑ ↓ to choose · ← → to change the country · OK to use · Back to return' : 'Back to close';
+    if (!main) {
+      this.paintWifi();
+      return;
+    }
     $('ovName').textContent = a?.device?.name || 'This screen';
+    const dl = a?.kept.downloads ?? [];
     const rows: [string, string][] = [
       ['Owner', a?.device?.owner ? '@' + a.device.owner : '—'],
       ['Connection', !a ? 'starting…' : a.online ? 'connected to ' + a.baseHost : 'offline — playing from this screen'],
-      ['Network', net ? (net.kind === 'ethernet' ? 'Ethernet' : net.kind === 'wifi' ? 'Wi-Fi ' + (net.ssid || '') : net.hotspot ? 'setup network ' + net.hotspot.ssid : 'none') + (net.ip ? ' · ' + net.ip : '') : '—'],
-      ['Stored', a && a.kept.total ? `${a.kept.stored} of ${a.kept.total} pieces` : '—'],
+      ['Network', networkLine(net)],
+      ['Stored', a && a.kept.total ? `${a.kept.stored} of ${a.kept.total} pieces` + (a.kept.mb ? ` · ${a.kept.mb} MB` : '') : '—'],
+      ['Downloading', dl.length ? dl.map(downloadLine).join(' · ') : 'nothing'],
       ['Version', a?.appVersion || '—'],
     ];
     const box = $('ovRows');
@@ -276,9 +427,55 @@ export class View {
     const forget = $('ovForget');
     forget.textContent = this.forgetArmed && Date.now() - this.forgetArmed < 8000 ? 'Press OK again to forget' : 'Forget this account';
     forget.className = 'ov-btn danger' + (this.overlayFocus === 0 ? ' focus' : '');
+    $('ovWifi').className = 'ov-btn' + (this.overlayFocus === 1 ? ' focus' : '');
     const debug = $('ovDebug');
     debug.textContent = this.debugOn ? 'Hide debug' : 'Show debug';
-    debug.className = 'ov-btn' + (this.overlayFocus === 1 ? ' focus' : '');
+    debug.className = 'ov-btn' + (this.overlayFocus === 2 ? ' focus' : '');
+  }
+
+  private paintWifi(): void {
+    const net = this.player.a?.network;
+    const rows: [string, string][] = [
+      ['Now', networkLine(net)],
+      ['Country', countryName(net?.country)],
+    ];
+    const box = $('ovWifiRows');
+    box.textContent = '';
+    rows.forEach(([k, v]) => {
+      box.appendChild(el('span', 'k', k));
+      box.appendChild(el('span', '', v));
+    });
+    const list = $('ovWifiList');
+    list.textContent = '';
+    const password = this.overlayView === 'password';
+    ($('ovPass') as HTMLElement).hidden = !password;
+    list.hidden = password;
+    if (password) $('ovPassLabel').textContent = `Password for ${this.joinTarget}`;
+    const items = this.wifiItems();
+    // Keep the focused row in view: the list shows about eight rows.
+    const first = Math.max(0, Math.min(this.wifiFocus - 3, items.length - 8));
+    items.slice(first, first + 8).forEach((item, n) => {
+      const row = el('div', 'ov-item' + (first + n === this.wifiFocus ? ' focus' : ''));
+      if (item.kind === 'country') {
+        const [code, name] = COUNTRIES[this.countryIndex]!;
+        row.appendChild(el('span', '', `Country: ‹ ${name} (${code}) ›`));
+        row.appendChild(el('span', 'dim', 'OK to set'));
+      } else if (item.kind === 'net') {
+        if (net?.wifi?.ssid === item.ssid) row.classList.add('current');
+        row.appendChild(el('span', '', (net?.wifi?.ssid === item.ssid ? '✓ ' : '') + item.ssid));
+        row.appendChild(el('span', 'dim', `${item.secured ? '🔒 ' : ''}${item.signal}%`));
+      } else if (item.kind === 'rescan') {
+        row.appendChild(el('span', '', 'Look for networks again'));
+      } else {
+        row.appendChild(el('span', '', 'Use my phone instead (opens the setup Wi-Fi)'));
+      }
+      list.appendChild(row);
+    });
+    if (!net?.scan?.length && !password) list.insertBefore(el('div', 'ov-item dim', 'Looking for networks…'), list.children[1] ?? null);
+    const status = $('ovWifiStatus');
+    const message = net?.joining ? `Joining ${net.joining}…` : net?.error || this.wifiNote;
+    status.textContent = message;
+    status.className = 'ov-status' + (net?.error && !net?.joining ? ' err' : '');
   }
 
   // Debug --------------------------------------------------------------------------------------
@@ -311,6 +508,8 @@ export class View {
       ['server now', hhmmss(new Date(now))],
       ['last sync', d?.lastSyncAgoMs != null ? (d.lastSyncAgoMs / 1000).toFixed(1) + ' s ago' : '—'],
       ['next sync', d?.nextSyncInMs != null ? (d.nextSyncInMs / 1000).toFixed(1) + ' s' : '—'],
+      ['network', networkLine(a?.network)],
+      ['wi-fi country', countryName(a?.network?.country)],
       ['screen', a ? `${a.capabilities.screenWidth}×${a.capabilities.screenHeight}${a.capabilities.originals ? ' · originals' : ''} · window ${window.innerWidth}×${window.innerHeight}` : '—'],
       ['panel power', d?.power || '—'],
       ['error', a?.lastError || p.cache.lastError || '—'],
@@ -337,6 +536,7 @@ export class View {
         ['kind', t.item.kind + (t.estimated ? ' · estimated slot' : '')],
         ['offset / slot', `${fmtDuration(t.offsetMs)} / ${t.slotMs ? fmtDuration(t.slotMs) : '∞'}`],
         ['on screen', cur.item ? cur.item.id + (cur.key === t.key ? '' : ' (held)') : '—'],
+        ['shown from', describeFile(cur.entry, cur.item, p.cache.stored)],
         ['holding', p.holding ? `<span class="warn">${esc(p.holding)}</span>` : '—', true],
         ['video', v ? `${v.paused ? 'paused' : 'playing'} ${v.currentTime.toFixed(1)} / ${isFinite(v.duration) ? v.duration.toFixed(1) : '?'} s${v.muted ? ' · muted' : ' · sound'}` : '—'],
       ]);
@@ -363,6 +563,11 @@ export class View {
         ['states', d ? Object.entries(d.store.states).map(([s, n]) => `${s} ${n}`).join(' · ') || '—' : '—'],
         ['error', k.error ? `<span class="warn">${esc(k.error)}</span>` : '—', true],
       ]);
+      for (const dl of k.downloads ?? []) {
+        const pct = dl.total ? Math.min(100, (dl.bytes / dl.total) * 100) : 0;
+        html += kv([[dl.itemId, `${fmtBytes(dl.bytes)} of ${fmtBytes(dl.total)} · ${fmtBytes(dl.speed)}/s · ${dl.seconds} s`]]);
+        html += `<div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>`;
+      }
     }
     if (d) {
       html += `<h3>Commands · ackSeq ${esc(d.ackSeq)}</h3>`;
