@@ -117,7 +117,7 @@ docs/     architecture, conformance results, open questions; solpersona/ is the 
 
 ### Run the screen on your computer
 
-Needs Docker and Node 20+.
+Needs Docker and Node 24 (the current LTS).
 
 ```sh
 (cd player && npm ci && npm run build)
