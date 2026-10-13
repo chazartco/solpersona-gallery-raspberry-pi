@@ -60,6 +60,10 @@ jobs:
             image/stage-solpersona/02-system/files/rootfs/usr/lib/solpersona-gallery/*.sh \
             image/stage-solpersona/02-system/files/rootfs/usr/lib/solpersona-gallery/run-agent \
             image/stage-solpersona/02-system/files/rootfs/usr/lib/solpersona-gallery/run-updater
+      - name: Scripts are executable (pi-gen skips stage scripts that are not)
+        run: |
+          bad="$(git ls-files -s -- '*.sh' '*/run-agent' '*/run-updater' | awk '$1 != "100755" {print $4}')"
+          if [ -n "$bad" ]; then echo "not executable in git:"; echo "$bad"; exit 1; fi
       - name: No private keys or access tokens in the repository
         run: |
           if git grep -nE '(BEGIN (EC |OPENSSH |RSA )?PRIVATE KEY|sps_[A-Za-z0-9_-]{20,})' -- ':!docs/solpersona'; then

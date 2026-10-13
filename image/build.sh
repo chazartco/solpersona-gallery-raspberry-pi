@@ -32,6 +32,8 @@ fi
 PG="$WORK/pi-gen"
 rm -rf "$PG/stage-solpersona"
 cp -a "$HERE/stage-solpersona" "$PG/stage-solpersona"
+# pi-gen silently skips any stage script that is not executable.
+find "$PG/stage-solpersona" -maxdepth 2 \( -name 'prerun.sh' -o -name '*-run.sh' -o -name '*-run-chroot.sh' \) -exec chmod +x {} +
 touch "$PG/stage2/SKIP_IMAGES"   # export only our stage
 mkdir -p "$PG/stage-solpersona/01-app/files"
 cp "$BUNDLE" "$PG/stage-solpersona/01-app/files/app.tar.gz"
